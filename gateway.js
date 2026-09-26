@@ -276,11 +276,18 @@ async function jalankanDemoAwal(activeUrl) {
 async function jalankanProtokolEstafet() {
     console.log(`\n[ESTAFET] ⏰ Waktu shift habis. Memulai protokol rotasi Ping-Pong...`);
     
-    const repoFullName = process.env.GITHUB_REPOSITORY; 
-    if (!repoFullName) {
-        console.error(`[ESTAFET] ❌ ERROR: GITHUB_REPOSITORY environment variable tidak terdeteksi!`);
-        return;
-    }
+    const repoFullName = (
+      process.env.CODESPACE_TARGET_REPO ||
+      process.env.GITHUB_REPOSITORY ||
+    ''
+    ).trim();
+
+if (!repoFullName || !repoFullName.includes('/')) {
+  console.error(
+    '[ESTAFET] ❌ Set CODESPACE_TARGET_REPO=owner/repo di .env (atau pastikan GITHUB_REPOSITORY ada).'
+  );
+  return;
+}
 
     // Mesin INI tetap melayani request sambil mencari pengganti.
     // PAT gagal dihidupkan (meski kuota shift sisa) → LREM langsung, coba PAT lain.
