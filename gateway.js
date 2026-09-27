@@ -8,28 +8,24 @@ const { Redis } = require('@upstash/redis');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 const chatgptModule = require('./platforms/chatgpt');
 
-// 🌟 MENYALAKAN VIRTUAL DISPLAY (XVFB)
 const xvfb = spawn('Xvfb', [':99', '-screen', '0', '1280x800x24']);
 process.env.DISPLAY = ':99';
 
-// 🌟 KREDENSIAL DARI .env (tidak hardcode)
 const PROXY_HOST = process.env.PROXY_HOST || '';
 const PROXY_PORT = parseInt(process.env.PROXY_PORT || '0', 10);
 const PROXY_VERSION = parseInt(process.env.PROXY_VERSION || '5', 10);
 
-// Fallback static (Webshare HTTP) saat localtonet mati — hindari IP datacenter Codespace
 const STATIC_PROXY_HOST = process.env.STATIC_PROXY_HOST || '';
 const STATIC_PROXY_PORT = parseInt(process.env.STATIC_PROXY_PORT || '0', 10);
 const STATIC_PROXY_USER = process.env.STATIC_PROXY_USER || '';
 const STATIC_PROXY_PASS = process.env.STATIC_PROXY_PASS || '';
-const STATIC_PROXY_TYPE = (process.env.STATIC_PROXY_TYPE || 'http').toLowerCase();
 
 const redis = new Redis({
   url: process.env.UPSTASH_REDIS_REST_URL,
   token: process.env.UPSTASH_REDIS_REST_TOKEN,
 });
 
-const MAX_COOKIES = 150; 
+const MAX_COOKIES = 150;
 const PORT = 3001;
 const app = express();
 
@@ -43,10 +39,13 @@ if (!fs.existsSync(folderTemp)) fs.mkdirSync(folderTemp);
 app.use('/files', express.static(folderHasil));
 
 // =====================================================================
-// RADAR PROXY + FAILOVER KE STATIC WEBSHARE
-// mode: 'primary' | 'static' | 'none'
+// RADAR PROXY
+// Pola sistem awal: Camoufox SOCKS HANYA via firefoxUserPrefs.
+// JANGAN kirim opsi `proxy:` Playwright untuk SOCKS — itu yang memicu
+// Firefox "Unable to find the proxy server".
+// Start optimistic (seperti isProxyHealthy = true di sistem awal).
 // =====================================================================
-let proxyMode = 'none'; // primary = localtonet, static = webshare, none = tanpa proxy (hindari)
+let proxyMode = PROXY_HOST && PROXY_PORT ? 'primary' : (STATIC_PROXY_HOST && STATIC_PROXY_PORT ? 'static' : 'none');
 
 function curlViaProxy(proxyUrl, cb) {
     exec(`curl -s --max-time 12 -x "${proxyUrl}" https://api.ipify.org`, (error, stdout) => {
@@ -56,13 +55,12 @@ function curlViaProxy(proxyUrl, cb) {
 }
 
 function monitorProxy() {
-    // 1) coba primary localtonet (SOCKS5)
     if (PROXY_HOST && PROXY_PORT) {
         const primaryUrl = `socks5h://${PROXY_HOST}:${PROXY_PORT}`;
         return curlViaProxy(primaryUrl, (ip) => {
             if (ip) {
                 if (proxyMode !== 'primary') {
-                    console.log(`\n[NETWORK] ✅ Primary localtonet ON (IP: ${ip})`);
+                    console.log(`\n[NETWORK] ✅ PROXY PULIH! SOCKS5 Aktif (IP: ${ip}).`);
                 }
                 proxyMode = 'primary';
                 redis.set('proxy_healthy', '1').catch(() => {});
@@ -70,7 +68,6 @@ function monitorProxy() {
                 redis.set('proxy_mode', 'primary').catch(() => {});
                 return;
             }
-            // 2) primary mati → coba static Webshare
             tryStaticFallback();
         });
     }
@@ -80,7 +77,7 @@ function monitorProxy() {
 function tryStaticFallback() {
     if (!STATIC_PROXY_HOST || !STATIC_PROXY_PORT) {
         if (proxyMode !== 'none') {
-            console.log(`\n[NETWORK] ⚠️ Primary + static mati. Jangan pakai IP datacenter Codespace.`);
+            console.log(`\n[NETWORK] ⚠️ PROXY MATI! Rute dialihkan ke jaringan lokal Codespace.`);
         }
         proxyMode = 'none';
         redis.set('proxy_healthy', '0').catch(() => {});
@@ -102,7 +99,7 @@ function tryStaticFallback() {
             redis.set('proxy_mode', 'static').catch(() => {});
         } else {
             if (proxyMode !== 'none') {
-                console.log(`\n[NETWORK] ❌ Primary + static gagal. proxy_mode=none`);
+                console.log(`\n[NETWORK] ⚠️ PROXY MATI! Rute dialihkan ke jaringan lokal Codespace.`);
             }
             proxyMode = 'none';
             redis.set('proxy_healthy', '0').catch(() => {});
@@ -111,32 +108,72 @@ function tryStaticFallback() {
     });
 }
 
-/** Opsi proxy Camoufox untuk request gateway saat ini */
-function getActiveGatewayProxy() {
+const CAMOUFOX_BASE_PREFS = {
+    'webgl.force-enabled': true,
+    'webgl.disabled': false,
+    'webgl.osmesa': true,
+    'layers.acceleration.force-enabled': true,
+    'dom.maxHardwareConcurrency': 8,
+    'pdfjs.disabled': true,
+    'browser.helperApps.neverAsk.saveToDisk': 'application/pdf,image/webp',
+};
+
+/**
+ * Launch Camoufox seperti sistem awal.
+ * primary SOCKS: firefoxUserPrefs saja (tanpa proxy:)
+ * static HTTP+auth: opsi proxy Playwright saja (Firefox prefs tidak support HTTP auth)
+ * none: network.proxy.type = 0 (direct)
+ */
+async function launchGatewayBrowser() {
+    const prefs = { ...CAMOUFOX_BASE_PREFS };
+    let label = 'Local';
+    let gunakanProxy = false;
+    const camoufoxOpts = {
+        headless: true,
+        width: 1280,
+        height: 720,
+    };
+
     if (proxyMode === 'primary' && PROXY_HOST && PROXY_PORT) {
-        return {
-            server: `socks5://${PROXY_HOST}:${PROXY_PORT}`,
-        };
-    }
-    if (proxyMode === 'static' && STATIC_PROXY_HOST && STATIC_PROXY_PORT) {
-        const opt = {
+        Object.assign(prefs, {
+            'network.proxy.type': 1,
+            'network.proxy.socks': PROXY_HOST,
+            'network.proxy.socks_port': PROXY_PORT,
+            'network.proxy.socks_version': PROXY_VERSION || 5,
+            'network.proxy.socks_remote_dns': true,
+            'network.dns.disableIPv6': true,
+        });
+        camoufoxOpts.geoip = true;
+        camoufoxOpts.firefoxUserPrefs = prefs;
+        label = 'Proxy';
+        gunakanProxy = true;
+    } else if (proxyMode === 'static' && STATIC_PROXY_HOST && STATIC_PROXY_PORT) {
+        camoufoxOpts.geoip = true;
+        camoufoxOpts.firefoxUserPrefs = prefs;
+        camoufoxOpts.proxy = {
             server: `http://${STATIC_PROXY_HOST}:${STATIC_PROXY_PORT}`,
         };
-        if (STATIC_PROXY_USER) opt.username = STATIC_PROXY_USER;
-        if (STATIC_PROXY_PASS) opt.password = STATIC_PROXY_PASS;
-        return opt;
+        if (STATIC_PROXY_USER) camoufoxOpts.proxy.username = STATIC_PROXY_USER;
+        if (STATIC_PROXY_PASS) camoufoxOpts.proxy.password = STATIC_PROXY_PASS;
+        label = 'Static';
+        gunakanProxy = true;
+    } else {
+        prefs['network.proxy.type'] = 0;
+        camoufoxOpts.geoip = false;
+        camoufoxOpts.firefoxUserPrefs = prefs;
+        label = 'Local';
+        gunakanProxy = false;
     }
-    return undefined; // none — lebih baik gagal daripada IP datacenter
+
+    const browser = await Camoufox(camoufoxOpts);
+    return { browser, label, gunakanProxy };
 }
 
 setInterval(monitorProxy, 30000);
-monitorProxy(); 
+monitorProxy();
 
-// =====================================================================
-// 🌟 VARIABEL STATUS GLOBAL
-// =====================================================================
-let isRetiring = false;      
-let jumlahTugasAktif = 0;    
+let isRetiring = false;
+let jumlahTugasAktif = 0;
 
 async function dapatkanSesiCookie() {
     let index = await redis.incr('global_chatgpt_index');
@@ -158,19 +195,19 @@ async function dapatkanSesiCookie() {
 app.post('/api/generate', async (req, res) => {
     if (isRetiring) return res.status(503).json({ error: "Sistem estafet aktif. Silakan request ulang." });
 
-    jumlahTugasAktif++; 
-    
+    jumlahTugasAktif++;
+
     const { action = 'CHAT', prompt, isThinkingMode = false, fileArray = [] } = req.body;
     let translatedFiles = [];
-    
+
     if (fileArray && fileArray.length > 0) {
         fileArray.forEach((fileObj, index) => {
             const matches = fileObj.base64.match(/^data:(.+);base64,(.+)$/);
             if (matches && matches.length === 3) {
                 const buffer = Buffer.from(matches[2], 'base64');
                 let originalExt = path.extname(fileObj.name);
-                if (!originalExt) originalExt = '.bin'; 
-                
+                if (!originalExt) originalExt = '.bin';
+
                 const safeName = `upload_${Date.now()}_${index}${originalExt}`;
                 const tempFilePath = path.join(folderTemp, safeName);
                 fs.writeFileSync(tempFilePath, buffer);
@@ -182,121 +219,87 @@ app.post('/api/generate', async (req, res) => {
     let browser, context;
     try {
         const sesi = await dapatkanSesiCookie();
-        const activeProxy = getActiveGatewayProxy();
-        const networkLabel = proxyMode === 'primary' ? 'localtonet' : (proxyMode === 'static' ? 'static-webshare' : 'none');
-        console.log(`[GATEWAY] 🚀 Tugas | aktif=${jumlahTugasAktif} | akun=${sesi.id} | net=${networkLabel}`);
+        console.log(`[GATEWAY] 🚀 Meluncurkan tugas | Pekerja Aktif: ${jumlahTugasAktif} | Akun: ${sesi.id} | net=${proxyMode}`);
 
-        const baseFirefoxPrefs = {
-            'webgl.force-enabled': true, 'webgl.disabled': false, 'webgl.osmesa': true,
-            'layers.acceleration.force-enabled': true, 'dom.maxHardwareConcurrency': 8,
-            'pdfjs.disabled': true, 'browser.helperApps.neverAsk.saveToDisk': 'application/pdf,image/webp'
-        };
-
-        browser = await Camoufox({
-            headless: true,
-            width: 1280,
-            height: 720,
-            geoip: !!activeProxy,
-            proxy: activeProxy,
-            firefoxUserPrefs: baseFirefoxPrefs
-        });
+        const launched = await launchGatewayBrowser();
+        browser = launched.browser;
         context = await browser.newContext({ acceptDownloads: true });
         await context.addCookies(sesi.cookies);
 
         const hasil = await chatgptModule.eksekusiChatGPT(action, prompt, isThinkingMode, translatedFiles, folderHasil, context);
-        
+
         const activeUrl = await redis.get('active_gateway_url') || `http://localhost:${PORT}`;
-        res.json({ status: "success", worker: sesi.id, network: networkLabel, text: hasil.text, fileUrls: hasil.files.map(f => `${activeUrl}/files/${f}`) });
-        
+        res.json({
+            status: 'success',
+            worker: sesi.id,
+            network: launched.label,
+            text: hasil.text,
+            fileUrls: hasil.files.map(f => `${activeUrl}/files/${f}`),
+        });
     } catch (error) {
         console.error(`[GATEWAY] ❌ TUGAS GAGAL: ${error.message}`);
-        res.status(500).json({ status: "failed", error: error.message });
+        res.status(500).json({ status: 'failed', error: error.message });
     } finally {
-        jumlahTugasAktif--; 
+        jumlahTugasAktif--;
         console.log(`[GATEWAY] 📉 Tugas selesai. Pekerja Aktif Tersisa: ${jumlahTugasAktif}`);
-        
-        if (context) await context.close().catch(()=>{});
-        if (browser) await browser.close().catch(()=>{});
+
+        if (context) await context.close().catch(() => {});
+        if (browser) await browser.close().catch(() => {});
         translatedFiles.forEach(file => { if (fs.existsSync(file)) fs.unlinkSync(file); });
     }
 });
 
-// =====================================================================
-// 🌟 FUNGSI DEMO REQUEST AWAL (STARTUP QC TEST)
-// =====================================================================
 async function jalankanDemoAwal(activeUrl) {
     console.log(`\n[SYSTEM-DEMO] 🚀 Memulai tes Quality Control (Demo Request) ke ChatGPT...`);
     let browser, context;
     try {
         const sesi = await dapatkanSesiCookie();
-        const activeProxy = getActiveGatewayProxy();
-        
-        const baseFirefoxPrefs = {
-            'webgl.force-enabled': true, 'webgl.disabled': false, 'webgl.osmesa': true,
-            'layers.acceleration.force-enabled': true, 'dom.maxHardwareConcurrency': 8,
-            'pdfjs.disabled': true, 'browser.helperApps.neverAsk.saveToDisk': 'application/pdf,image/webp'
-        };
+        const launched = await launchGatewayBrowser();
+        browser = launched.browser;
+        console.log(`[SYSTEM-DEMO] net=${launched.label} mode=${proxyMode}`);
 
-        browser = await Camoufox({
-            headless: true,
-            width: 1280,
-            height: 720,
-            geoip: !!activeProxy,
-            proxy: activeProxy,
-            firefoxUserPrefs: baseFirefoxPrefs
-        });
         context = await browser.newContext({ acceptDownloads: true });
         await context.addCookies(sesi.cookies);
 
-        const promptDemo = "Berikan satu kalimat sapaan selamat datang yang sangat lucu, sedikit nyeleneh, dan penuh semangat untuk Bosku.";
+        const promptDemo = 'Berikan satu kalimat sapaan selamat datang yang sangat lucu, sedikit nyeleneh, dan penuh semangat untuk Bosku.';
         const hasil = await chatgptModule.eksekusiChatGPT('CHAT', promptDemo, false, [], folderHasil, context);
 
         console.log(`\n======================================================`);
         console.log(`🎉 [DEMO SUKSES] Sistem Otomasi 100% Sehat!`);
         console.log(`🤖 Pesan dari ChatGPT: "${hasil.text}"`);
-        
+
         if (activeUrl) {
             await redis.set('active_gateway_url', activeUrl);
             console.log(`[SYSTEM] 🟢 TAUTAN CLOUDFLARE DIBUKA: Vercel sekarang dialihkan ke mesin ini!`);
         }
         console.log(`======================================================\n`);
-        
     } catch (error) {
         console.error(`\n[SYSTEM-DEMO] ❌ Gagal menjalankan tes QC: ${error.message}`);
         console.log(`[SYSTEM-DEMO] ⚠️ URL Cloudflare DITAHAN. Codespace lama masih memegang kendali rute.\n`);
     } finally {
-        if (context) await context.close().catch(()=>{});
-        if (browser) await browser.close().catch(()=>{});
+        if (context) await context.close().catch(() => {});
+        if (browser) await browser.close().catch(() => {});
     }
 }
 
-// =====================================================================
-// 🔄 ADVANCED PROTOKOL ESTAFET (ANTI-FLAG & AUTO-WIPE)
-// =====================================================================
 async function jalankanProtokolEstafet() {
     console.log(`\n[ESTAFET] ⏰ Waktu shift habis. Memulai protokol rotasi Ping-Pong...`);
-    
+
     const repoFullName = (
-      process.env.CODESPACE_TARGET_REPO ||
-      process.env.GITHUB_REPOSITORY ||
-    ''
+        process.env.CODESPACE_TARGET_REPO ||
+        process.env.GITHUB_REPOSITORY ||
+        ''
     ).trim();
 
-if (!repoFullName || !repoFullName.includes('/')) {
-  console.error(
-    '[ESTAFET] ❌ Set CODESPACE_TARGET_REPO=owner/repo di .env (atau pastikan GITHUB_REPOSITORY ada).'
-  );
-  return;
-}
+    if (!repoFullName || !repoFullName.includes('/')) {
+        console.error('[ESTAFET] ❌ Set CODESPACE_TARGET_REPO=owner/repo di .env (atau pastikan GITHUB_REPOSITORY ada).');
+        return;
+    }
 
-    // Mesin INI tetap melayani request sambil mencari pengganti.
-    // PAT gagal dihidupkan (meski kuota shift sisa) → LREM langsung, coba PAT lain.
-    // Stok kosong / semua ban → tetap loop, tunggu bot_github RPUSH PAT baru.
     let isSuccess = false;
     let nextPat = null;
     const ESTAFET_WAIT_MS = 30000;
 
-    // PAT mesin INI (untuk self-destruct nanti) — harus di luar loop
     let rawMyPat0 = await redis.get('current_active_pat');
     let myPat = (typeof rawMyPat0 === 'string' ? rawMyPat0 : '').trim();
 
@@ -315,7 +318,6 @@ if (!repoFullName || !repoFullName.includes('/')) {
         }
 
         let validPats = rawPats.filter(pat => (patShifts[pat] || 0) > 0);
-        // Utamakan PAT yang bukan milik mesin ini
         let candidates = validPats.filter(pat => pat !== myPat);
         if (candidates.length === 0) candidates = validPats.slice();
 
@@ -329,11 +331,9 @@ if (!repoFullName || !repoFullName.includes('/')) {
         console.log(`[ESTAFET] 🔄 Coba bangunkan penerus dengan PAT: ${nextPat.substring(0, 8)}... (sisa kandidat: ${candidates.length})`);
 
         try {
-            // AUTO-WIPER codespace usang di akun penerus
-            const checkRes = await fetch(`https://api.github.com/user/codespaces`, {
-                headers: { 'Authorization': `Bearer ${nextPat}`, 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }
+            const checkRes = await fetch('https://api.github.com/user/codespaces', {
+                headers: { Authorization: `Bearer ${nextPat}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }
             });
-            // checkRes tidak ok → tetap lanjut coba create; kalau create gagal baru LREM
             if (checkRes.ok) {
                 const checkData = await checkRes.json();
                 if (checkData.codespaces && checkData.codespaces.length > 0) {
@@ -341,21 +341,21 @@ if (!repoFullName || !repoFullName.includes('/')) {
                     for (let cs of checkData.codespaces) {
                         await fetch(`https://api.github.com/user/codespaces/${cs.name}`, {
                             method: 'DELETE',
-                            headers: { 'Authorization': `Bearer ${nextPat}`, 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }
+                            headers: { Authorization: `Bearer ${nextPat}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }
                         });
                     }
                 }
             }
 
             const repoRes = await fetch(`https://api.github.com/repos/${repoFullName}`, {
-                headers: { 'Authorization': `Bearer ${nextPat}`, 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }
+                headers: { Authorization: `Bearer ${nextPat}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }
             });
             if (!repoRes.ok) throw new Error('Gagal akses Repo. PAT flagged/dicabut atau tidak bisa dihidupkan.');
             const repoData = await repoRes.json();
 
-            const createRes = await fetch(`https://api.github.com/user/codespaces`, {
+            const createRes = await fetch('https://api.github.com/user/codespaces', {
                 method: 'POST',
-                headers: { 'Authorization': `Bearer ${nextPat}`, 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' },
+                headers: { Authorization: `Bearer ${nextPat}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' },
                 body: JSON.stringify({
                     repository_id: repoData.id,
                     idle_timeout_minutes: 240
@@ -380,72 +380,64 @@ if (!repoFullName || !repoFullName.includes('/')) {
                 console.log(`[ESTAFET] PAT ${nextPat.substring(0, 8)}... kuota habis → LREM`);
             }
         } catch (err) {
-            // Kuota masih sisa pun, jika tidak bisa dihidupkan → buang PAT, coba lain / tunggu stok baru
             console.error(`[ESTAFET] ❌ PAT ${nextPat.substring(0, 8)}... gagal dihidupkan: ${err.message}`);
             console.log(`[ESTAFET] ⚠️ LREM PAT ini dari stok, mesin tetap bekerja, cari pengganti lain...`);
             await redis.lrem('github_pats', 1, nextPat);
             delete patShifts[nextPat];
             await redis.set('pat_shift_quota', patShifts);
-            // loop lagi: baca stok terbaru (bot mungkin RPUSH sementara ini)
             await new Promise(r => setTimeout(r, 3000));
         }
     }
 
-    // 🌟 SINKRONISASI DETAK JANTUNG
     console.log(`[ESTAFET] 📡 Menunggu mesin penerus menyelesaikan QC dan mengambil alih rute Cloudflare...`);
     const oldUrl = await redis.get('active_gateway_url');
-    
+
     const pantauPengambilalihan = setInterval(async () => {
         const currentUrl = await redis.get('active_gateway_url');
-        
+
         if (currentUrl && currentUrl !== oldUrl) {
             clearInterval(pantauPengambilalihan);
             console.log(`\n[ESTAFET] 🔄 PENGAMBILALIHAN BERHASIL! Rute tugas telah berpindah.`);
-            
-            isRetiring = true; 
+
+            isRetiring = true;
             console.log(`[ESTAFET] 🛑 Menolak tugas baru. Menunggu ${jumlahTugasAktif} tugas tersisa diselesaikan...`);
-            
-            // 🌟 3. TIMEOUT PEMBUNUH DIRI: Batas waktu maksimal 5 menit untuk Graceful Draining
-            let batasWaktuTunggu = 60; // 60 iterasi x 5 detik = 5 menit maksimal
+
+            let batasWaktuTunggu = 60;
 
             const cekSisaTugas = setInterval(async () => {
                 batasWaktuTunggu--;
                 if (jumlahTugasAktif === 0 || batasWaktuTunggu <= 0) {
                     clearInterval(cekSisaTugas);
-                    
+
                     if (batasWaktuTunggu <= 0) console.log(`[ESTAFET] ⚠️ Waktu habis! Memaksa pembersihan tugas yang nyangkut.`);
                     console.log(`[ESTAFET] 🪦 Memulai penghancuran diri (Self-Destruct)...`);
-                    
+
                     try {
                         const currentCodespaceName = process.env.CODESPACE_NAME;
                         if (currentCodespaceName && myPat) {
                             const delRes = await fetch(`https://api.github.com/user/codespaces/${currentCodespaceName}`, {
                                 method: 'DELETE',
-                                headers: { 'Authorization': `Bearer ${myPat}`, 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }
+                                headers: { Authorization: `Bearer ${myPat}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }
                             });
                             console.log(`[ESTAFET] Laporan Status Hancur Diri: HTTP ${delRes.status}`);
                         }
                     } catch (e) {
                         console.error(`[ESTAFET] Kesalahan saat memanggil API Hancur Diri: ${e.message}`);
                     }
-                    process.exit(0); 
+                    process.exit(0);
                 }
             }, 5000);
         }
-    }, 10000); 
+    }, 10000);
 }
 
-// =====================================================================
-// 🌟 INISIASI SERVER & CLOUDFLARE (INSTAN)
-// =====================================================================
 app.listen(PORT, async () => {
     console.log(`🚀 API Gateway Camoufox menyala di Port ${PORT}`);
-    
+
     const rawMyPat = await redis.get('current_active_pat');
-    const myPat = (typeof rawMyPat === 'string' ? rawMyPat : "").trim();
-    
+    const myPat = (typeof rawMyPat === 'string' ? rawMyPat : '').trim();
+
     if (!myPat) {
-        // Ambil PAT paling depan dari Redis LIST
         const first = await redis.lindex('github_pats', 0);
         if (first) await redis.set('current_active_pat', String(first).trim());
     }
@@ -457,29 +449,30 @@ app.listen(PORT, async () => {
             console.log(`[SYSTEM] ⬇️ Mengunduh Cloudflared...`);
             require('child_process').execSync(`wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O "${cloudflaredPath}" && chmod +x "${cloudflaredPath}"`);
         }
-        
+
         const cf = spawn(cloudflaredPath, ['tunnel', '--url', `http://localhost:${PORT}`]);
         let urlFound = false;
-        
+
         cf.stderr.on('data', async (data) => {
             const match = data.toString().match(/https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com/);
             if (match && !urlFound) {
                 urlFound = true;
                 const activeUrl = match[0];
-                
+
                 console.log(`[SYSTEM] 🔎 Terowongan Tertangkap: ${activeUrl}`);
                 console.log(`[SYSTEM] 🛑 Menahan publikasi URL ke Vercel sampai QC Test selesai...`);
-                
-                const SHIFT_DURATION_MS = 10  * 60 * 1000; // Mode Pengujian (3 Menit)
+
+                const SHIFT_DURATION_MS = parseInt(process.env.SHIFT_DURATION_MS || String(3 * 60 * 60 * 1000), 10);
                 setTimeout(jalankanProtokolEstafet, SHIFT_DURATION_MS);
-                
+
                 await jalankanDemoAwal(activeUrl);
             }
         });
-        
-        cf.on('close', (code) => {
-            if(!urlFound) console.log(`[SYSTEM] ❌ Cloudflare terputus secara tak wajar.`);
+
+        cf.on('close', () => {
+            if (!urlFound) console.log(`[SYSTEM] ❌ Cloudflare terputus secara tak wajar.`);
         });
-        
-    } catch (err) { console.error(`[SYSTEM] ❌ Gagal menjalankan Cloudflare:`, err.message); }
+    } catch (err) {
+        console.error(`[SYSTEM] ❌ Gagal menjalankan Cloudflare:`, err.message);
+    }
 });
