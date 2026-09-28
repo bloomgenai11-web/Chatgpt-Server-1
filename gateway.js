@@ -462,7 +462,7 @@ app.listen(PORT, async () => {
                 console.log(`[SYSTEM] 🔎 Terowongan Tertangkap: ${activeUrl}`);
                 console.log(`[SYSTEM] 🛑 Menahan publikasi URL ke Vercel sampai QC Test selesai...`);
 
-                const SHIFT_DURATION_MS = parseInt(process.env.SHIFT_DURATION_MS || String(3 * 60 * 60 * 1000), 10);
+                const SHIFT_DURATION_MS = parseInt(process.env.SHIFT_DURATION_MS || String(30 * 60 * 1000), 10);
                 setTimeout(jalankanProtokolEstafet, SHIFT_DURATION_MS);
 
                 await jalankanDemoAwal(activeUrl);
