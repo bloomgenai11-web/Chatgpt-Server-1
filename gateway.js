@@ -444,6 +444,8 @@ app.listen(PORT, async () => {
         if (first) await redis.set('current_active_pat', String(first).trim());
     }
 
+    startDeadman(redis);
+
     console.log(`[SYSTEM] 🚇 Memulai inisiasi Cloudflare Tunnel seketika...`);
     const cloudflaredPath = path.join(__dirname, 'cloudflared');
     try {
