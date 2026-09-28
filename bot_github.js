@@ -18,7 +18,7 @@ const BOT_PROXY_TYPE = (process.env.BOT_PROXY_TYPE || 'socks5').toLowerCase(); /
 const BOT_PROXY_VERSION = parseInt(process.env.BOT_PROXY_VERSION || '5', 10);
 
 const REDIS_QUEUE_KEY = process.env.REDIS_QUEUE_KEY || 'atomicmail:accounts';
-const MAX_PAT_STOCK = 3; // bot hanya isi jika stok PAT < 3
+const MAX_PAT_STOCK = 4; // bot hanya isi jika stok PAT < 3
 const GATE_POLL_MS = 30000;
 const IDLE_TIMEOUT_MINUTES = 240;
 // ===========================================================
