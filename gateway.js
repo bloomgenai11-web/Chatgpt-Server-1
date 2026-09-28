@@ -25,6 +25,8 @@ const redis = new Redis({
   token: process.env.UPSTASH_REDIS_REST_TOKEN,
 });
 
+const { startDeadman } = require('./qstash_deadman');
+
 const MAX_COOKIES = 150;
 const PORT = 3001;
 const app = express();
