@@ -347,6 +347,23 @@ async function buatSatuAkunGitHub(atomicEmail, atomicPassword) {
       const emailOk = await waitForSuccess(page, '#email');
       console.log(emailOk ? '✅ email' : '⚠️ email (lanjut)');
     } catch (e) {
+      const stamp = Date.now();
+      const safe = atomicEmail.replace(/[^a-zA-Z0-9]/g, '_');
+      const shot = path.join(__dirname, `error_email_${safe}_${stamp}.png`);
+      const htmlPath = path.join(__dirname, `error_email_${safe}_${stamp}.html`);
+      try {
+        await page.screenshot({ path: shot, fullPage: true });
+        console.log(`[BAD_IP] screenshot: ${shot}`);
+      } catch (ssErr) {
+        console.log(`[BAD_IP] screenshot gagal: ${ssErr.message}`);
+      }
+      try {
+        const html = await page.content();
+        fs.writeFileSync(htmlPath, html);
+        console.log(`[BAD_IP] html: ${htmlPath}`);
+      } catch {}
+      const title = await page.title().catch(() => '');
+      console.log(`[BAD_IP] URL=${page.url()} title=${title}`);
       throw new BadIpError(`Gagal isi/lihat kolom email (IP jelek?): ${e.message}`);
     }
     // Email sudah masuk kolom → kegagalan setelah ini = BAD_EMAIL
