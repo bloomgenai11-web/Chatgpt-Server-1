@@ -27,6 +27,15 @@ const redis = new Redis({
 
 const { startDeadman } = require('./qstash_deadman');
 
+function ghHeaders(pat) {
+    return {
+        Authorization: `Bearer ${pat}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        'User-Agent': 'gateway-estafet',
+    };
+}
+
 const MAX_COOKIES = 150;
 const PORT = 3001;
 const app = express();
@@ -334,7 +343,7 @@ async function jalankanProtokolEstafet() {
 
         try {
             const checkRes = await fetch('https://api.github.com/user/codespaces', {
-                headers: { Authorization: `Bearer ${nextPat}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }
+                headers: ghHeaders(nextPat)
             });
             if (checkRes.ok) {
                 const checkData = await checkRes.json();
@@ -343,21 +352,21 @@ async function jalankanProtokolEstafet() {
                     for (let cs of checkData.codespaces) {
                         await fetch(`https://api.github.com/user/codespaces/${cs.name}`, {
                             method: 'DELETE',
-                            headers: { Authorization: `Bearer ${nextPat}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }
+                            headers: ghHeaders(nextPat)
                         });
                     }
                 }
             }
 
             const repoRes = await fetch(`https://api.github.com/repos/${repoFullName}`, {
-                headers: { Authorization: `Bearer ${nextPat}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }
+                headers: ghHeaders(nextPat)
             });
             if (!repoRes.ok) throw new Error('Gagal akses Repo. PAT flagged/dicabut atau tidak bisa dihidupkan.');
             const repoData = await repoRes.json();
 
             const createRes = await fetch('https://api.github.com/user/codespaces', {
                 method: 'POST',
-                headers: { Authorization: `Bearer ${nextPat}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' },
+                headers: { ...ghHeaders(nextPat), 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     repository_id: repoData.id,
                     idle_timeout_minutes: 240
@@ -419,7 +428,7 @@ async function jalankanProtokolEstafet() {
                         if (currentCodespaceName && myPat) {
                             const delRes = await fetch(`https://api.github.com/user/codespaces/${currentCodespaceName}`, {
                                 method: 'DELETE',
-                                headers: { Authorization: `Bearer ${myPat}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }
+                                headers: ghHeaders(myPat)
                             });
                             console.log(`[ESTAFET] Laporan Status Hancur Diri: HTTP ${delRes.status}`);
                         }
