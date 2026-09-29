@@ -36,6 +36,7 @@ function ghHeaders(pat) {
     };
 }
 
+const SHIFTS_PER_PAT = parseInt(process.env.SHIFTS_PER_PAT || '24', 10);
 const MAX_COOKIES = 150;
 const PORT = 3001;
 const app = express();
@@ -325,7 +326,7 @@ async function jalankanProtokolEstafet() {
         let patShifts = await redis.get('pat_shift_quota') || {};
         if (typeof patShifts !== 'object' || patShifts === null) patShifts = {};
         for (const pat of rawPats) {
-            if (patShifts[pat] === undefined) patShifts[pat] = 4;
+            if (patShifts[pat] === undefined) patShifts[pat] = SHIFTS_PER_PAT;
         }
 
         let validPats = rawPats.filter(pat => (patShifts[pat] || 0) > 0);
@@ -380,7 +381,7 @@ async function jalankanProtokolEstafet() {
             console.log(`[ESTAFET] ✅ Penerus sukses dipesan, sedang booting!`);
             isSuccess = true;
 
-            patShifts[nextPat] = (patShifts[nextPat] || 4) - 1;
+            patShifts[nextPat] = (patShifts[nextPat] || SHIFTS_PER_PAT) - 1;
             await redis.set('pat_shift_quota', patShifts);
             await redis.set('current_active_pat', nextPat.trim());
 
