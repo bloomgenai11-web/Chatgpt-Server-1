@@ -18,7 +18,8 @@ const BOT_PROXY_TYPE = (process.env.BOT_PROXY_TYPE || 'socks5').toLowerCase(); /
 const BOT_PROXY_VERSION = parseInt(process.env.BOT_PROXY_VERSION || '5', 10);
 
 const REDIS_QUEUE_KEY = process.env.REDIS_QUEUE_KEY || 'atomicmail:accounts';
-const MAX_PAT_STOCK = 4; // bot hanya isi jika stok PAT < 3
+const MAX_PAT_STOCK = 4; // bot isi jika stok PAT < 4
+const SHIFTS_PER_PAT = parseInt(process.env.SHIFTS_PER_PAT || '24', 10); // 24 × 30 menit = 12 jam
 const GATE_POLL_MS = 30000;
 const IDLE_TIMEOUT_MINUTES = 240;
 // ===========================================================
@@ -64,12 +65,12 @@ async function appendPatToRedis(pat) {
   try {
     const len = await redis.rpush('github_pats', String(pat).trim());
     console.log(`[PAT] ✅ RPUSH github_pats. Total sekarang: ${len}`);
-    // kuota shift default 4 (hash terpisah, ditulis sekali)
+    // kuota shift: 24 × 30 menit = 12 jam (SHIFTS_PER_PAT)
     try {
       const shifts = (await redis.get('pat_shift_quota')) || {};
       const obj = typeof shifts === 'object' && shifts !== null ? shifts : {};
       if (obj[pat] === undefined) {
-        obj[pat] = 4;
+        obj[pat] = SHIFTS_PER_PAT;
         await redis.set('pat_shift_quota', obj);
       }
     } catch {}
