@@ -37,6 +37,7 @@ function ghHeaders(pat) {
 }
 
 const SHIFTS_PER_PAT = parseInt(process.env.SHIFTS_PER_PAT || '24', 10);
+
 const MAX_COOKIES = 150;
 const PORT = 3001;
 const app = express();
@@ -262,35 +263,60 @@ app.post('/api/generate', async (req, res) => {
 });
 
 async function jalankanDemoAwal(activeUrl) {
-    console.log(`\n[SYSTEM-DEMO] 🚀 Memulai tes Quality Control (Demo Request) ke ChatGPT...`);
-    let browser, context;
+    const MAX_QC_TRIES = parseInt(process.env.QC_MAX_TRIES || '3', 10);
+    const QC_RETRY_MS = parseInt(process.env.QC_RETRY_MS || '10000', 10);
+
+    console.log(`\n[SYSTEM-DEMO] 🚀 Tes QC ChatGPT (maks ${MAX_QC_TRIES} kali, jeda ${QC_RETRY_MS / 1000}s)...`);
+
+    let sesi;
     try {
-        const sesi = await dapatkanSesiCookie();
-        const launched = await launchGatewayBrowser();
-        browser = launched.browser;
-        console.log(`[SYSTEM-DEMO] net=${launched.label} mode=${proxyMode}`);
+        sesi = await dapatkanSesiCookie();
+    } catch (e) {
+        console.error(`[SYSTEM-DEMO] ❌ Gagal ambil cookie: ${e.message}`);
+        console.log(`[SYSTEM-DEMO] ⚠️ URL Cloudflare DITAHAN.\n`);
+        return;
+    }
 
-        context = await browser.newContext({ acceptDownloads: true });
-        await context.addCookies(sesi.cookies);
+    const promptDemo = 'Berikan satu kalimat sapaan selamat datang yang sangat lucu, sedikit nyeleneh, dan penuh semangat untuk Bosku.';
 
-        const promptDemo = 'Berikan satu kalimat sapaan selamat datang yang sangat lucu, sedikit nyeleneh, dan penuh semangat untuk Bosku.';
-        const hasil = await chatgptModule.eksekusiChatGPT('CHAT', promptDemo, false, [], folderHasil, context);
+    for (let attempt = 1; attempt <= MAX_QC_TRIES; attempt++) {
+        let browser;
+        let context;
+        try {
+            if (attempt > 1) {
+                console.log(`[SYSTEM-DEMO] ↻ Coba lagi ${attempt}/${MAX_QC_TRIES} (proxy fox / QC gagal)...`);
+                monitorProxy();
+                await new Promise((r) => setTimeout(r, QC_RETRY_MS));
+            }
 
-        console.log(`\n======================================================`);
-        console.log(`🎉 [DEMO SUKSES] Sistem Otomasi 100% Sehat!`);
-        console.log(`🤖 Pesan dari ChatGPT: "${hasil.text}"`);
+            const launched = await launchGatewayBrowser();
+            browser = launched.browser;
+            console.log(`[SYSTEM-DEMO] percobaan ${attempt}/${MAX_QC_TRIES} net=${launched.label} mode=${proxyMode} akun=${sesi.id}`);
 
-        if (activeUrl) {
-            await redis.set('active_gateway_url', activeUrl);
-            console.log(`[SYSTEM] 🟢 TAUTAN CLOUDFLARE DIBUKA: Vercel sekarang dialihkan ke mesin ini!`);
+            context = await browser.newContext({ acceptDownloads: true });
+            await context.addCookies(sesi.cookies);
+
+            const hasil = await chatgptModule.eksekusiChatGPT('CHAT', promptDemo, false, [], folderHasil, context);
+
+            console.log(`\n======================================================`);
+            console.log(`🎉 [DEMO SUKSES] Percobaan ${attempt}/${MAX_QC_TRIES} — sistem sehat.`);
+            console.log(`🤖 Pesan dari ChatGPT: "${hasil.text}"`);
+
+            if (activeUrl) {
+                await redis.set('active_gateway_url', activeUrl);
+                console.log(`[SYSTEM] 🟢 TAUTAN CLOUDFLARE DIBUKA: Vercel dialihkan ke mesin ini.`);
+            }
+            console.log(`======================================================\n`);
+            return;
+        } catch (error) {
+            console.error(`[SYSTEM-DEMO] ❌ Percobaan ${attempt}/${MAX_QC_TRIES} gagal: ${error.message}`);
+            if (attempt >= MAX_QC_TRIES) {
+                console.log(`[SYSTEM-DEMO] ⚠️ QC gagal ${MAX_QC_TRIES}x. URL Cloudflare DITAHAN. Codespace lama tetap pegang rute.\n`);
+            }
+        } finally {
+            if (context) await context.close().catch(() => {});
+            if (browser) await browser.close().catch(() => {});
         }
-        console.log(`======================================================\n`);
-    } catch (error) {
-        console.error(`\n[SYSTEM-DEMO] ❌ Gagal menjalankan tes QC: ${error.message}`);
-        console.log(`[SYSTEM-DEMO] ⚠️ URL Cloudflare DITAHAN. Codespace lama masih memegang kendali rute.\n`);
-    } finally {
-        if (context) await context.close().catch(() => {});
-        if (browser) await browser.close().catch(() => {});
     }
 }
 
