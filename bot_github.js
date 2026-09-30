@@ -1,4 +1,4 @@
-const { Camoufox } = require('./camoufox_compat');
+const { Camoufox } = require('camoufox-js');
 const fs = require('fs');
 const path = require('path');
 const { Redis } = require('@upstash/redis');
@@ -18,8 +18,7 @@ const BOT_PROXY_TYPE = (process.env.BOT_PROXY_TYPE || 'socks5').toLowerCase(); /
 const BOT_PROXY_VERSION = parseInt(process.env.BOT_PROXY_VERSION || '5', 10);
 
 const REDIS_QUEUE_KEY = process.env.REDIS_QUEUE_KEY || 'atomicmail:accounts';
-const MAX_PAT_STOCK = 3; // bot hanya isi jika stok PAT < 3
-const SHIFTS_PER_PAT = parseInt(process.env.SHIFTS_PER_PAT || '24', 10); // 24 × 30 menit = 12 jam
+const MAX_PAT_STOCK = 4; // bot hanya isi jika stok PAT < 3
 const GATE_POLL_MS = 30000;
 const IDLE_TIMEOUT_MINUTES = 240;
 // ===========================================================
@@ -70,7 +69,7 @@ async function appendPatToRedis(pat) {
       const shifts = (await redis.get('pat_shift_quota')) || {};
       const obj = typeof shifts === 'object' && shifts !== null ? shifts : {};
       if (obj[pat] === undefined) {
-        obj[pat] = SHIFTS_PER_PAT;
+        obj[pat] = 4;
         await redis.set('pat_shift_quota', obj);
       }
     } catch {}
