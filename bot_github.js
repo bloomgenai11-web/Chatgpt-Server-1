@@ -1,4 +1,4 @@
-const { Camoufox } = require('camoufox-js');
+const { Camoufox, isCamoufoxConfigError } = require('./camoufox_safe');
 const fs = require('fs');
 const path = require('path');
 const { Redis } = require('@upstash/redis');
@@ -18,7 +18,8 @@ const BOT_PROXY_TYPE = (process.env.BOT_PROXY_TYPE || 'socks5').toLowerCase(); /
 const BOT_PROXY_VERSION = parseInt(process.env.BOT_PROXY_VERSION || '5', 10);
 
 const REDIS_QUEUE_KEY = process.env.REDIS_QUEUE_KEY || 'atomicmail:accounts';
-const MAX_PAT_STOCK = 3; // bot hanya isi jika stok PAT < 3
+const MAX_PAT_STOCK = 4; // bot isi jika stok PAT < 4
+const SHIFTS_PER_PAT = parseInt(process.env.SHIFTS_PER_PAT || '24', 10); // 24 × 30 menit = 12 jam
 const GATE_POLL_MS = 30000;
 const IDLE_TIMEOUT_MINUTES = 240;
 // ===========================================================
@@ -64,12 +65,12 @@ async function appendPatToRedis(pat) {
   try {
     const len = await redis.rpush('github_pats', String(pat).trim());
     console.log(`[PAT] ✅ RPUSH github_pats. Total sekarang: ${len}`);
-    // kuota shift default 4 (hash terpisah, ditulis sekali)
+    // kuota shift: 24 × 30 menit = 12 jam (SHIFTS_PER_PAT)
     try {
       const shifts = (await redis.get('pat_shift_quota')) || {};
       const obj = typeof shifts === 'object' && shifts !== null ? shifts : {};
       if (obj[pat] === undefined) {
-        obj[pat] = 4;
+        obj[pat] = SHIFTS_PER_PAT;
         await redis.set('pat_shift_quota', obj);
       }
     } catch {}
@@ -313,17 +314,24 @@ async function buatSatuAkunGitHub(atomicEmail, atomicPassword) {
 
   // Satu akun = satu browser = satu sesi proxy = satu fingerprint Camoufox
   const proxyOpt = buildGithubProxyOption();
-  const browser = await Camoufox({
-    headless: HEADLESS,
-    width: 1280,
-    height: 720,
-    geoip: !!proxyOpt,
-    proxy: proxyOpt,
-    firefoxUserPrefs: buildGithubBasePrefs()
-  });
-
-  const context = await browser.newContext();
-  const page = await context.newPage();
+  let browser;
+  let context;
+  let page;
+  try {
+    browser = await Camoufox({
+      headless: HEADLESS,
+      width: 1280,
+      height: 720,
+      geoip: !!proxyOpt,
+      proxy: proxyOpt,
+      firefoxUserPrefs: buildGithubBasePrefs()
+    });
+    context = await browser.newContext();
+    page = await context.newPage();
+  } catch (e) {
+    if (browser) await browser.close().catch(() => {});
+    throw new BadIpError(`Gagal launch Camoufox (bukan email): ${e.message}`);
+  }
 
   try {
     console.log('🌐 Cek IP proxy...');
@@ -347,6 +355,23 @@ async function buatSatuAkunGitHub(atomicEmail, atomicPassword) {
       const emailOk = await waitForSuccess(page, '#email');
       console.log(emailOk ? '✅ email' : '⚠️ email (lanjut)');
     } catch (e) {
+      const stamp = Date.now();
+      const safe = atomicEmail.replace(/[^a-zA-Z0-9]/g, '_');
+      const shot = path.join(__dirname, `error_email_${safe}_${stamp}.png`);
+      const htmlPath = path.join(__dirname, `error_email_${safe}_${stamp}.html`);
+      try {
+        await page.screenshot({ path: shot, fullPage: true });
+        console.log(`[BAD_IP] screenshot: ${shot}`);
+      } catch (ssErr) {
+        console.log(`[BAD_IP] screenshot gagal: ${ssErr.message}`);
+      }
+      try {
+        const html = await page.content();
+        fs.writeFileSync(htmlPath, html);
+        console.log(`[BAD_IP] html: ${htmlPath}`);
+      } catch {}
+      const title = await page.title().catch(() => '');
+      console.log(`[BAD_IP] URL=${page.url()} title=${title}`);
       throw new BadIpError(`Gagal isi/lihat kolom email (IP jelek?): ${e.message}`);
     }
     // Email sudah masuk kolom → kegagalan setelah ini = BAD_EMAIL
@@ -545,18 +570,18 @@ async function buatSatuAkunGitHub(atomicEmail, atomicPassword) {
   } catch (err) {
     console.error(`❌ ${err.message}`);
     const safe = atomicEmail.replace(/[^a-zA-Z0-9]/g, '_');
-    await page.screenshot({ path: `error_${safe}.png` }).catch(() => {});
-    // Pastikan tetap typed error ke main
+    if (page) await page.screenshot({ path: `error_${safe}.png` }).catch(() => {});
     if (err instanceof BadIpError || err instanceof BadEmailError) throw err;
-    // Error lain setelah email terisi → anggap BAD_EMAIL (email sudah di-LPOP)
-    if (err.code === 'BAD_IP') throw err;
+    if (err.code === 'BAD_IP' || isCamoufoxConfigError(err)) {
+      throw new BadIpError(err.message || String(err));
+    }
     throw new BadEmailError(err.message || String(err));
   } finally {
-    if (!HEADLESS) {
+    if (!HEADLESS && page) {
       console.log('\nBrowser terbuka 15 detik...');
       await page.waitForTimeout(15000);
     }
-    await browser.close().catch(() => {});
+    if (browser) await browser.close().catch(() => {});
   }
 }
 
@@ -609,7 +634,7 @@ async function main() {
       // Browser ditutup di finally → fingerprint baru di percobaan berikutnya
       await buatSatuAkunGitHub(akun.email, akun.password);
     } catch (e) {
-      if (e instanceof BadIpError || e.code === 'BAD_IP') {
+      if (e instanceof BadIpError || e.code === 'BAD_IP' || isCamoufoxConfigError(e)) {
         console.error(`[BAD_IP] ${akun.email} → ${e.message}`);
         console.log('[BAD_IP] Kembalikan email ke antrian, coba lagi dengan IP + fingerprint baru...');
         await kembalikanEmailKeAntrian(akun.email, akun.password);
