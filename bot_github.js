@@ -1,4 +1,4 @@
-const { Camoufox } = require('camoufox-js');
+const { Camoufox, isCamoufoxConfigError } = require('./camoufox_safe');
 const fs = require('fs');
 const path = require('path');
 const { Redis } = require('@upstash/redis');
@@ -314,17 +314,24 @@ async function buatSatuAkunGitHub(atomicEmail, atomicPassword) {
 
   // Satu akun = satu browser = satu sesi proxy = satu fingerprint Camoufox
   const proxyOpt = buildGithubProxyOption();
-  const browser = await Camoufox({
-    headless: HEADLESS,
-    width: 1280,
-    height: 720,
-    geoip: !!proxyOpt,
-    proxy: proxyOpt,
-    firefoxUserPrefs: buildGithubBasePrefs()
-  });
-
-  const context = await browser.newContext();
-  const page = await context.newPage();
+  let browser;
+  let context;
+  let page;
+  try {
+    browser = await Camoufox({
+      headless: HEADLESS,
+      width: 1280,
+      height: 720,
+      geoip: !!proxyOpt,
+      proxy: proxyOpt,
+      firefoxUserPrefs: buildGithubBasePrefs()
+    });
+    context = await browser.newContext();
+    page = await context.newPage();
+  } catch (e) {
+    if (browser) await browser.close().catch(() => {});
+    throw new BadIpError(`Gagal launch Camoufox (bukan email): ${e.message}`);
+  }
 
   try {
     console.log('🌐 Cek IP proxy...');
@@ -563,18 +570,18 @@ async function buatSatuAkunGitHub(atomicEmail, atomicPassword) {
   } catch (err) {
     console.error(`❌ ${err.message}`);
     const safe = atomicEmail.replace(/[^a-zA-Z0-9]/g, '_');
-    await page.screenshot({ path: `error_${safe}.png` }).catch(() => {});
-    // Pastikan tetap typed error ke main
+    if (page) await page.screenshot({ path: `error_${safe}.png` }).catch(() => {});
     if (err instanceof BadIpError || err instanceof BadEmailError) throw err;
-    // Error lain setelah email terisi → anggap BAD_EMAIL (email sudah di-LPOP)
-    if (err.code === 'BAD_IP') throw err;
+    if (err.code === 'BAD_IP' || isCamoufoxConfigError(err)) {
+      throw new BadIpError(err.message || String(err));
+    }
     throw new BadEmailError(err.message || String(err));
   } finally {
-    if (!HEADLESS) {
+    if (!HEADLESS && page) {
       console.log('\nBrowser terbuka 15 detik...');
       await page.waitForTimeout(15000);
     }
-    await browser.close().catch(() => {});
+    if (browser) await browser.close().catch(() => {});
   }
 }
 
@@ -627,7 +634,7 @@ async function main() {
       // Browser ditutup di finally → fingerprint baru di percobaan berikutnya
       await buatSatuAkunGitHub(akun.email, akun.password);
     } catch (e) {
-      if (e instanceof BadIpError || e.code === 'BAD_IP') {
+      if (e instanceof BadIpError || e.code === 'BAD_IP' || isCamoufoxConfigError(e)) {
         console.error(`[BAD_IP] ${akun.email} → ${e.message}`);
         console.log('[BAD_IP] Kembalikan email ke antrian, coba lagi dengan IP + fingerprint baru...');
         await kembalikanEmailKeAntrian(akun.email, akun.password);
