@@ -3,7 +3,7 @@ const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 const { spawn, exec } = require('child_process');
-const { Camoufox } = require('./camoufox_compat');
+const { Camoufox } = require('camoufox-js');
 const { Redis } = require('@upstash/redis');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 const chatgptModule = require('./platforms/chatgpt');
@@ -26,17 +26,6 @@ const redis = new Redis({
 });
 
 const { startDeadman } = require('./qstash_deadman');
-
-function ghHeaders(pat) {
-    return {
-        Authorization: `Bearer ${pat}`,
-        Accept: 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2022-11-28',
-        'User-Agent': 'gateway-estafet',
-    };
-}
-
-const SHIFTS_PER_PAT = parseInt(process.env.SHIFTS_PER_PAT || '24', 10);
 
 const MAX_COOKIES = 150;
 const PORT = 3001;
@@ -263,60 +252,35 @@ app.post('/api/generate', async (req, res) => {
 });
 
 async function jalankanDemoAwal(activeUrl) {
-    const MAX_QC_TRIES = parseInt(process.env.QC_MAX_TRIES || '3', 10);
-    const QC_RETRY_MS = parseInt(process.env.QC_RETRY_MS || '10000', 10);
-
-    console.log(`\n[SYSTEM-DEMO] 🚀 Tes QC ChatGPT (maks ${MAX_QC_TRIES} kali, jeda ${QC_RETRY_MS / 1000}s)...`);
-
-    let sesi;
+    console.log(`\n[SYSTEM-DEMO] 🚀 Memulai tes Quality Control (Demo Request) ke ChatGPT...`);
+    let browser, context;
     try {
-        sesi = await dapatkanSesiCookie();
-    } catch (e) {
-        console.error(`[SYSTEM-DEMO] ❌ Gagal ambil cookie: ${e.message}`);
-        console.log(`[SYSTEM-DEMO] ⚠️ URL Cloudflare DITAHAN.\n`);
-        return;
-    }
+        const sesi = await dapatkanSesiCookie();
+        const launched = await launchGatewayBrowser();
+        browser = launched.browser;
+        console.log(`[SYSTEM-DEMO] net=${launched.label} mode=${proxyMode}`);
 
-    const promptDemo = 'Berikan satu kalimat sapaan selamat datang yang sangat lucu, sedikit nyeleneh, dan penuh semangat untuk Bosku.';
+        context = await browser.newContext({ acceptDownloads: true });
+        await context.addCookies(sesi.cookies);
 
-    for (let attempt = 1; attempt <= MAX_QC_TRIES; attempt++) {
-        let browser;
-        let context;
-        try {
-            if (attempt > 1) {
-                console.log(`[SYSTEM-DEMO] ↻ Coba lagi ${attempt}/${MAX_QC_TRIES} (proxy fox / QC gagal)...`);
-                monitorProxy();
-                await new Promise((r) => setTimeout(r, QC_RETRY_MS));
-            }
+        const promptDemo = 'Berikan satu kalimat sapaan selamat datang yang sangat lucu, sedikit nyeleneh, dan penuh semangat untuk Bosku.';
+        const hasil = await chatgptModule.eksekusiChatGPT('CHAT', promptDemo, false, [], folderHasil, context);
 
-            const launched = await launchGatewayBrowser();
-            browser = launched.browser;
-            console.log(`[SYSTEM-DEMO] percobaan ${attempt}/${MAX_QC_TRIES} net=${launched.label} mode=${proxyMode} akun=${sesi.id}`);
+        console.log(`\n======================================================`);
+        console.log(`🎉 [DEMO SUKSES] Sistem Otomasi 100% Sehat!`);
+        console.log(`🤖 Pesan dari ChatGPT: "${hasil.text}"`);
 
-            context = await browser.newContext({ acceptDownloads: true });
-            await context.addCookies(sesi.cookies);
-
-            const hasil = await chatgptModule.eksekusiChatGPT('CHAT', promptDemo, false, [], folderHasil, context);
-
-            console.log(`\n======================================================`);
-            console.log(`🎉 [DEMO SUKSES] Percobaan ${attempt}/${MAX_QC_TRIES} — sistem sehat.`);
-            console.log(`🤖 Pesan dari ChatGPT: "${hasil.text}"`);
-
-            if (activeUrl) {
-                await redis.set('active_gateway_url', activeUrl);
-                console.log(`[SYSTEM] 🟢 TAUTAN CLOUDFLARE DIBUKA: Vercel dialihkan ke mesin ini.`);
-            }
-            console.log(`======================================================\n`);
-            return;
-        } catch (error) {
-            console.error(`[SYSTEM-DEMO] ❌ Percobaan ${attempt}/${MAX_QC_TRIES} gagal: ${error.message}`);
-            if (attempt >= MAX_QC_TRIES) {
-                console.log(`[SYSTEM-DEMO] ⚠️ QC gagal ${MAX_QC_TRIES}x. URL Cloudflare DITAHAN. Codespace lama tetap pegang rute.\n`);
-            }
-        } finally {
-            if (context) await context.close().catch(() => {});
-            if (browser) await browser.close().catch(() => {});
+        if (activeUrl) {
+            await redis.set('active_gateway_url', activeUrl);
+            console.log(`[SYSTEM] 🟢 TAUTAN CLOUDFLARE DIBUKA: Vercel sekarang dialihkan ke mesin ini!`);
         }
+        console.log(`======================================================\n`);
+    } catch (error) {
+        console.error(`\n[SYSTEM-DEMO] ❌ Gagal menjalankan tes QC: ${error.message}`);
+        console.log(`[SYSTEM-DEMO] ⚠️ URL Cloudflare DITAHAN. Codespace lama masih memegang kendali rute.\n`);
+    } finally {
+        if (context) await context.close().catch(() => {});
+        if (browser) await browser.close().catch(() => {});
     }
 }
 
@@ -352,7 +316,7 @@ async function jalankanProtokolEstafet() {
         let patShifts = await redis.get('pat_shift_quota') || {};
         if (typeof patShifts !== 'object' || patShifts === null) patShifts = {};
         for (const pat of rawPats) {
-            if (patShifts[pat] === undefined) patShifts[pat] = SHIFTS_PER_PAT;
+            if (patShifts[pat] === undefined) patShifts[pat] = 4;
         }
 
         let validPats = rawPats.filter(pat => (patShifts[pat] || 0) > 0);
@@ -370,7 +334,7 @@ async function jalankanProtokolEstafet() {
 
         try {
             const checkRes = await fetch('https://api.github.com/user/codespaces', {
-                headers: ghHeaders(nextPat)
+                headers: { Authorization: `Bearer ${nextPat}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }
             });
             if (checkRes.ok) {
                 const checkData = await checkRes.json();
@@ -379,21 +343,21 @@ async function jalankanProtokolEstafet() {
                     for (let cs of checkData.codespaces) {
                         await fetch(`https://api.github.com/user/codespaces/${cs.name}`, {
                             method: 'DELETE',
-                            headers: ghHeaders(nextPat)
+                            headers: { Authorization: `Bearer ${nextPat}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }
                         });
                     }
                 }
             }
 
             const repoRes = await fetch(`https://api.github.com/repos/${repoFullName}`, {
-                headers: ghHeaders(nextPat)
+                headers: { Authorization: `Bearer ${nextPat}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }
             });
             if (!repoRes.ok) throw new Error('Gagal akses Repo. PAT flagged/dicabut atau tidak bisa dihidupkan.');
             const repoData = await repoRes.json();
 
             const createRes = await fetch('https://api.github.com/user/codespaces', {
                 method: 'POST',
-                headers: { ...ghHeaders(nextPat), 'Content-Type': 'application/json' },
+                headers: { Authorization: `Bearer ${nextPat}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' },
                 body: JSON.stringify({
                     repository_id: repoData.id,
                     idle_timeout_minutes: 240
@@ -407,7 +371,7 @@ async function jalankanProtokolEstafet() {
             console.log(`[ESTAFET] ✅ Penerus sukses dipesan, sedang booting!`);
             isSuccess = true;
 
-            patShifts[nextPat] = (patShifts[nextPat] || SHIFTS_PER_PAT) - 1;
+            patShifts[nextPat] = (patShifts[nextPat] || 4) - 1;
             await redis.set('pat_shift_quota', patShifts);
             await redis.set('current_active_pat', nextPat.trim());
 
@@ -455,7 +419,7 @@ async function jalankanProtokolEstafet() {
                         if (currentCodespaceName && myPat) {
                             const delRes = await fetch(`https://api.github.com/user/codespaces/${currentCodespaceName}`, {
                                 method: 'DELETE',
-                                headers: ghHeaders(myPat)
+                                headers: { Authorization: `Bearer ${myPat}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }
                             });
                             console.log(`[ESTAFET] Laporan Status Hancur Diri: HTTP ${delRes.status}`);
                         }
