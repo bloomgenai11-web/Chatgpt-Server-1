@@ -14,12 +14,12 @@ const BOT_PROXY_HOST = process.env.BOT_PROXY_HOST || process.env.PROXY_HOST || '
 const BOT_PROXY_PORT = parseInt(process.env.BOT_PROXY_PORT || process.env.PROXY_PORT || '0', 10);
 const BOT_PROXY_USER = process.env.BOT_PROXY_USER || '';
 const BOT_PROXY_PASS = process.env.BOT_PROXY_PASS || '';
-const BOT_PROXY_TYPE = (process.env.BOT_PROXY_TYPE || 'socks5').toLowerCase(); // socks5 | http
+const BOT_PROXY_TYPE = (process.env.BOT_PROXY_TYPE || 'http').toLowerCase(); // socks5 | http
 const BOT_PROXY_VERSION = parseInt(process.env.BOT_PROXY_VERSION || '5', 10);
 
 const REDIS_QUEUE_KEY = process.env.REDIS_QUEUE_KEY || 'atomicmail:accounts';
-const MAX_PAT_STOCK = 4; // bot isi jika stok PAT < 4
-const SHIFTS_PER_PAT = parseInt(process.env.SHIFTS_PER_PAT || '24', 10); // 24 × 30 menit = 12 jam
+const MAX_PAT_STOCK = parseInt(process.env.MAX_PAT_STOCK || '4', 10);
+const SHIFTS_PER_PAT = parseInt(process.env.SHIFTS_PER_PAT || '24', 10);
 const GATE_POLL_MS = 30000;
 const IDLE_TIMEOUT_MINUTES = 240;
 // ===========================================================
@@ -65,7 +65,6 @@ async function appendPatToRedis(pat) {
   try {
     const len = await redis.rpush('github_pats', String(pat).trim());
     console.log(`[PAT] ✅ RPUSH github_pats. Total sekarang: ${len}`);
-    // kuota shift: 24 × 30 menit = 12 jam (SHIFTS_PER_PAT)
     try {
       const shifts = (await redis.get('pat_shift_quota')) || {};
       const obj = typeof shifts === 'object' && shifts !== null ? shifts : {};
@@ -313,6 +312,7 @@ async function buatSatuAkunGitHub(atomicEmail, atomicPassword) {
   let username = randomUsername();
 
   // Satu akun = satu browser = satu sesi proxy = satu fingerprint Camoufox
+  // Launch setingkat script awal: tidak force os, pool BrowserForge penuh.
   const proxyOpt = buildGithubProxyOption();
   let browser;
   let context;
@@ -335,8 +335,12 @@ async function buatSatuAkunGitHub(atomicEmail, atomicPassword) {
 
   try {
     console.log('🌐 Cek IP proxy...');
-    await page.goto('https://api.ipify.org', { waitUntil: 'domcontentloaded', timeout: 20000 });
-    console.log(`✅ IP: ${await page.innerText('body')}`);
+    try {
+      await page.goto('https://api.ipify.org', { waitUntil: 'domcontentloaded', timeout: 20000 });
+      console.log(`✅ IP: ${await page.innerText('body')}`);
+    } catch (e) {
+      throw new BadIpError(`Proxy tidak bisa reach ipify: ${e.message}`);
+    }
 
     console.log('🌐 github.com/signup...');
     try {
@@ -600,6 +604,7 @@ async function main() {
   console.log(`[Gate] PAT < ${MAX_PAT_STOCK} | tanpa batas IP | AtomicMail = lokal`);
   console.log(`[Email] Redis list: ${REDIS_QUEUE_KEY}`);
   console.log(`[Idle] ${IDLE_TIMEOUT_MINUTES} menit`);
+  console.log(`[Fingerprint] camoufox_safe (no forced os, pool penuh)`);
 
   let index = 0;
   while (true) {
@@ -618,7 +623,7 @@ async function main() {
       break;
     }
 
-    // 3) ambil email (tidak ada limit IP)
+    // 3) ambil email
     const akun = await ambilAkunDariRedis();
     if (!akun) {
       console.log('[Redis] LPOP kosong. Selesai.');
@@ -638,7 +643,6 @@ async function main() {
         console.error(`[BAD_IP] ${akun.email} → ${e.message}`);
         console.log('[BAD_IP] Kembalikan email ke antrian, coba lagi dengan IP + fingerprint baru...');
         await kembalikanEmailKeAntrian(akun.email, akun.password);
-        // jeda singkat lalu loop → LPOP email yang sama (atau antrean lain) + browser baru
         await new Promise(r => setTimeout(r, 5000));
         continue;
       }
