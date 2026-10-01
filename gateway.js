@@ -20,6 +20,13 @@ const STATIC_PROXY_PORT = parseInt(process.env.STATIC_PROXY_PORT || '0', 10);
 const STATIC_PROXY_USER = process.env.STATIC_PROXY_USER || '';
 const STATIC_PROXY_PASS = process.env.STATIC_PROXY_PASS || '';
 
+// Smartproxy (BOT_PROXY_*) — fallback ChatGPT saat localtonet mati
+const BOT_PROXY_HOST = process.env.BOT_PROXY_HOST || '';
+const BOT_PROXY_PORT = parseInt(process.env.BOT_PROXY_PORT || '0', 10);
+const BOT_PROXY_USER = process.env.BOT_PROXY_USER || '';
+const BOT_PROXY_PASS = process.env.BOT_PROXY_PASS || '';
+const BOT_PROXY_TYPE = (process.env.BOT_PROXY_TYPE || 'http').toLowerCase();
+
 const redis = new Redis({
   url: process.env.UPSTASH_REDIS_REST_URL,
   token: process.env.UPSTASH_REDIS_REST_TOKEN,
@@ -87,15 +94,47 @@ function monitorProxy() {
     tryStaticFallback();
 }
 
-function tryStaticFallback() {
-    if (!STATIC_PROXY_HOST || !STATIC_PROXY_PORT) {
-        if (proxyMode !== 'none') {
-            console.log(`\n[NETWORK] ⚠️ PROXY MATI! Rute dialihkan ke jaringan lokal Codespace.`);
-        }
-        proxyMode = 'none';
+function setProxyMode(mode, ip) {
+    proxyMode = mode;
+    if (mode === 'none') {
         redis.set('proxy_healthy', '0').catch(() => {});
         redis.set('proxy_mode', 'none').catch(() => {});
         return;
+    }
+    redis.set('proxy_healthy', '1').catch(() => {});
+    if (ip) redis.set('proxy_current_ip', ip).catch(() => {});
+    redis.set('proxy_mode', mode).catch(() => {});
+}
+
+function trySmartproxyFallback() {
+    if (!BOT_PROXY_HOST || !BOT_PROXY_PORT) {
+        if (proxyMode !== 'none') {
+            console.log(`\n[NETWORK] ⚠️ Semua proxy mati. Rute → jaringan lokal Codespace (geoip OFF).`);
+        }
+        setProxyMode('none');
+        return;
+    }
+    const scheme = BOT_PROXY_TYPE === 'socks5' ? 'socks5h' : 'http';
+    const auth = BOT_PROXY_USER ? `${BOT_PROXY_USER}:${BOT_PROXY_PASS}@` : '';
+    const smartUrl = `${scheme}://${auth}${BOT_PROXY_HOST}:${BOT_PROXY_PORT}`;
+    curlViaProxy(smartUrl, (ip) => {
+        if (ip) {
+            if (proxyMode !== 'smart') {
+                console.log(`\n[NETWORK] ⚠️ localtonet/static mati → Smartproxy ON (IP: ${ip}) | ChatGPT geoip ON`);
+            }
+            setProxyMode('smart', ip);
+        } else {
+            if (proxyMode !== 'none') {
+                console.log(`\n[NETWORK] ⚠️ Semua proxy mati. Rute → jaringan lokal Codespace (geoip OFF).`);
+            }
+            setProxyMode('none');
+        }
+    });
+}
+
+function tryStaticFallback() {
+    if (!STATIC_PROXY_HOST || !STATIC_PROXY_PORT) {
+        return trySmartproxyFallback();
     }
     const auth = STATIC_PROXY_USER
         ? `${STATIC_PROXY_USER}:${STATIC_PROXY_PASS}@`
@@ -106,17 +145,9 @@ function tryStaticFallback() {
             if (proxyMode !== 'static') {
                 console.log(`\n[NETWORK] ⚠️ localtonet mati → STATIC Webshare ON (IP: ${ip})`);
             }
-            proxyMode = 'static';
-            redis.set('proxy_healthy', '1').catch(() => {});
-            redis.set('proxy_current_ip', ip).catch(() => {});
-            redis.set('proxy_mode', 'static').catch(() => {});
+            setProxyMode('static', ip);
         } else {
-            if (proxyMode !== 'none') {
-                console.log(`\n[NETWORK] ⚠️ PROXY MATI! Rute dialihkan ke jaringan lokal Codespace.`);
-            }
-            proxyMode = 'none';
-            redis.set('proxy_healthy', '0').catch(() => {});
-            redis.set('proxy_mode', 'none').catch(() => {});
+            trySmartproxyFallback();
         }
     });
 }
@@ -148,6 +179,7 @@ async function launchGatewayBrowser() {
     };
 
     if (proxyMode === 'primary' && PROXY_HOST && PROXY_PORT) {
+        // localtonet SOCKS5 — via firefox prefs saja (jangan opsi proxy: Playwright)
         Object.assign(prefs, {
             'network.proxy.type': 1,
             'network.proxy.socks': PROXY_HOST,
@@ -169,6 +201,18 @@ async function launchGatewayBrowser() {
         if (STATIC_PROXY_USER) camoufoxOpts.proxy.username = STATIC_PROXY_USER;
         if (STATIC_PROXY_PASS) camoufoxOpts.proxy.password = STATIC_PROXY_PASS;
         label = 'Static';
+        gunakanProxy = true;
+    } else if (proxyMode === 'smart' && BOT_PROXY_HOST && BOT_PROXY_PORT) {
+        // Smartproxy HTTP/SOCKS — ChatGPT fallback saat localtonet mati; geoip ON
+        const scheme = BOT_PROXY_TYPE === 'socks5' ? 'socks5' : 'http';
+        camoufoxOpts.geoip = true;
+        camoufoxOpts.firefoxUserPrefs = prefs;
+        camoufoxOpts.proxy = {
+            server: `${scheme}://${BOT_PROXY_HOST}:${BOT_PROXY_PORT}`,
+        };
+        if (BOT_PROXY_USER) camoufoxOpts.proxy.username = BOT_PROXY_USER;
+        if (BOT_PROXY_PASS) camoufoxOpts.proxy.password = BOT_PROXY_PASS;
+        label = 'Smart';
         gunakanProxy = true;
     } else {
         prefs['network.proxy.type'] = 0;
