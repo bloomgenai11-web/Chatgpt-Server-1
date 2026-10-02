@@ -3,7 +3,7 @@ const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 const { spawn, exec } = require('child_process');
-const { Camoufox } = require('./camoufox_safe');
+const { Camoufox } = require('camoufox-js');
 const { Redis } = require('@upstash/redis');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 const chatgptModule = require('./platforms/chatgpt');
@@ -15,17 +15,17 @@ const PROXY_HOST = process.env.PROXY_HOST || '';
 const PROXY_PORT = parseInt(process.env.PROXY_PORT || '0', 10);
 const PROXY_VERSION = parseInt(process.env.PROXY_VERSION || '5', 10);
 
+// Layer 2: Bright Data ISP (HTTP + auth) — setelah localtonet gagal
+const BD_PROXY_HOST = process.env.BD_PROXY_HOST || process.env.BRIGHTDATA_HOST || '';
+const BD_PROXY_PORT = parseInt(process.env.BD_PROXY_PORT || process.env.BRIGHTDATA_PORT || '0', 10);
+const BD_PROXY_USER = process.env.BD_PROXY_USER || process.env.BRIGHTDATA_USER || '';
+const BD_PROXY_PASS = process.env.BD_PROXY_PASS || process.env.BRIGHTDATA_PASS || '';
+
+// Layer 3 (opsional): Webshare / static HTTP — jika Bright Data juga gagal
 const STATIC_PROXY_HOST = process.env.STATIC_PROXY_HOST || '';
 const STATIC_PROXY_PORT = parseInt(process.env.STATIC_PROXY_PORT || '0', 10);
 const STATIC_PROXY_USER = process.env.STATIC_PROXY_USER || '';
 const STATIC_PROXY_PASS = process.env.STATIC_PROXY_PASS || '';
-
-// Smartproxy (BOT_PROXY_*) — fallback ChatGPT saat localtonet mati
-const BOT_PROXY_HOST = process.env.BOT_PROXY_HOST || '';
-const BOT_PROXY_PORT = parseInt(process.env.BOT_PROXY_PORT || '0', 10);
-const BOT_PROXY_USER = process.env.BOT_PROXY_USER || '';
-const BOT_PROXY_PASS = process.env.BOT_PROXY_PASS || '';
-const BOT_PROXY_TYPE = (process.env.BOT_PROXY_TYPE || 'http').toLowerCase();
 
 const redis = new Redis({
   url: process.env.UPSTASH_REDIS_REST_URL,
@@ -59,13 +59,20 @@ if (!fs.existsSync(folderTemp)) fs.mkdirSync(folderTemp);
 app.use('/files', express.static(folderHasil));
 
 // =====================================================================
-// RADAR PROXY
-// Pola sistem awal: Camoufox SOCKS HANYA via firefoxUserPrefs.
-// JANGAN kirim opsi `proxy:` Playwright untuk SOCKS — itu yang memicu
-// Firefox "Unable to find the proxy server".
-// Start optimistic (seperti isProxyHealthy = true di sistem awal).
+// RADAR PROXY (3 layer)
+// primary   = PROXY_* SOCKS (localtonet)
+// brightdata = BD_PROXY_* HTTP+auth ISP (setelah localtonet gagal)
+// static    = STATIC_* HTTP+auth Webshare (opsional L3)
+// none      = direct Codespace
+// Launch: opsi proxy Playwright (selaras bot_github.js), bukan camoufox_safe.
 // =====================================================================
-let proxyMode = PROXY_HOST && PROXY_PORT ? 'primary' : (STATIC_PROXY_HOST && STATIC_PROXY_PORT ? 'static' : 'none');
+function initialProxyMode() {
+    if (PROXY_HOST && PROXY_PORT) return 'primary';
+    if (BD_PROXY_HOST && BD_PROXY_PORT) return 'brightdata';
+    if (STATIC_PROXY_HOST && STATIC_PROXY_PORT) return 'static';
+    return 'none';
+}
+let proxyMode = initialProxyMode();
 
 function curlViaProxy(proxyUrl, cb) {
     exec(`curl -s --max-time 12 -x "${proxyUrl}" https://api.ipify.org`, (error, stdout) => {
@@ -74,67 +81,50 @@ function curlViaProxy(proxyUrl, cb) {
     });
 }
 
+function setMode(mode, ip, logLine) {
+    if (logLine && proxyMode !== mode) console.log(logLine);
+    proxyMode = mode;
+    const healthy = mode === 'none' ? '0' : '1';
+    redis.set('proxy_healthy', healthy).catch(() => {});
+    redis.set('proxy_mode', mode).catch(() => {});
+    if (ip) redis.set('proxy_current_ip', ip).catch(() => {});
+}
+
 function monitorProxy() {
     if (PROXY_HOST && PROXY_PORT) {
         const primaryUrl = `socks5h://${PROXY_HOST}:${PROXY_PORT}`;
         return curlViaProxy(primaryUrl, (ip) => {
             if (ip) {
-                if (proxyMode !== 'primary') {
-                    console.log(`\n[NETWORK] ✅ PROXY PULIH! SOCKS5 Aktif (IP: ${ip}).`);
-                }
-                proxyMode = 'primary';
-                redis.set('proxy_healthy', '1').catch(() => {});
-                redis.set('proxy_current_ip', ip).catch(() => {});
-                redis.set('proxy_mode', 'primary').catch(() => {});
+                setMode('primary', ip, `\n[NETWORK] ✅ L1 localtonet ON (IP: ${ip}).`);
                 return;
             }
-            tryStaticFallback();
+            tryBrightDataFallback();
         });
     }
-    tryStaticFallback();
+    tryBrightDataFallback();
 }
 
-function setProxyMode(mode, ip) {
-    proxyMode = mode;
-    if (mode === 'none') {
-        redis.set('proxy_healthy', '0').catch(() => {});
-        redis.set('proxy_mode', 'none').catch(() => {});
-        return;
+function tryBrightDataFallback() {
+    if (!BD_PROXY_HOST || !BD_PROXY_PORT) {
+        return tryStaticFallback();
     }
-    redis.set('proxy_healthy', '1').catch(() => {});
-    if (ip) redis.set('proxy_current_ip', ip).catch(() => {});
-    redis.set('proxy_mode', mode).catch(() => {});
-}
-
-function trySmartproxyFallback() {
-    if (!BOT_PROXY_HOST || !BOT_PROXY_PORT) {
-        if (proxyMode !== 'none') {
-            console.log(`\n[NETWORK] ⚠️ Semua proxy mati. Rute → jaringan lokal Codespace (geoip OFF).`);
-        }
-        setProxyMode('none');
-        return;
-    }
-    const scheme = BOT_PROXY_TYPE === 'socks5' ? 'socks5h' : 'http';
-    const auth = BOT_PROXY_USER ? `${BOT_PROXY_USER}:${BOT_PROXY_PASS}@` : '';
-    const smartUrl = `${scheme}://${auth}${BOT_PROXY_HOST}:${BOT_PROXY_PORT}`;
-    curlViaProxy(smartUrl, (ip) => {
+    const auth = BD_PROXY_USER
+        ? `${encodeURIComponent(BD_PROXY_USER)}:${encodeURIComponent(BD_PROXY_PASS)}@`
+        : '';
+    const bdUrl = `http://${auth}${BD_PROXY_HOST}:${BD_PROXY_PORT}`;
+    curlViaProxy(bdUrl, (ip) => {
         if (ip) {
-            if (proxyMode !== 'smart') {
-                console.log(`\n[NETWORK] ⚠️ localtonet/static mati → Smartproxy ON (IP: ${ip}) | ChatGPT geoip ON`);
-            }
-            setProxyMode('smart', ip);
-        } else {
-            if (proxyMode !== 'none') {
-                console.log(`\n[NETWORK] ⚠️ Semua proxy mati. Rute → jaringan lokal Codespace (geoip OFF).`);
-            }
-            setProxyMode('none');
+            setMode('brightdata', ip, `\n[NETWORK] ⚠️ L1 mati → L2 Bright Data ISP ON (IP: ${ip})`);
+            return;
         }
+        tryStaticFallback();
     });
 }
 
 function tryStaticFallback() {
     if (!STATIC_PROXY_HOST || !STATIC_PROXY_PORT) {
-        return trySmartproxyFallback();
+        setMode('none', null, `\n[NETWORK] ⚠️ Semua proxy mati → lokal Codespace.`);
+        return;
     }
     const auth = STATIC_PROXY_USER
         ? `${STATIC_PROXY_USER}:${STATIC_PROXY_PASS}@`
@@ -142,12 +132,9 @@ function tryStaticFallback() {
     const staticUrl = `http://${auth}${STATIC_PROXY_HOST}:${STATIC_PROXY_PORT}`;
     curlViaProxy(staticUrl, (ip) => {
         if (ip) {
-            if (proxyMode !== 'static') {
-                console.log(`\n[NETWORK] ⚠️ localtonet mati → STATIC Webshare ON (IP: ${ip})`);
-            }
-            setProxyMode('static', ip);
+            setMode('static', ip, `\n[NETWORK] ⚠️ L2 gagal → L3 STATIC Webshare ON (IP: ${ip})`);
         } else {
-            trySmartproxyFallback();
+            setMode('none', null, `\n[NETWORK] ⚠️ Semua proxy mati → lokal Codespace.`);
         }
     });
 }
@@ -163,10 +150,9 @@ const CAMOUFOX_BASE_PREFS = {
 };
 
 /**
- * Launch Camoufox seperti sistem awal.
- * primary SOCKS: firefoxUserPrefs saja (tanpa proxy:)
- * static HTTP+auth: opsi proxy Playwright saja (Firefox prefs tidak support HTTP auth)
- * none: network.proxy.type = 0 (direct)
+ * Launch Camoufox — HTTP proxy Playwright (Bright Data / static).
+ * localtonet SOCKS TIDAK dipakai di browser (Unable to find the proxy server).
+ * Opt-in eksperimen: GATEWAY_USE_LOCALTONET=true
  */
 async function launchGatewayBrowser() {
     const prefs = { ...CAMOUFOX_BASE_PREFS };
@@ -176,10 +162,14 @@ async function launchGatewayBrowser() {
         headless: true,
         width: 1280,
         height: 720,
+        firefoxUserPrefs: prefs,
     };
 
-    if (proxyMode === 'primary' && PROXY_HOST && PROXY_PORT) {
-        // localtonet SOCKS5 — via firefox prefs saja (jangan opsi proxy: Playwright)
+    // localtonet SOCKS di Camoufox = "Unable to find the proxy server" (lihat screenshot).
+    // Browser ChatGPT: Bright Data HTTP → STATIC → direct. Radar L1 tetap curl.
+    const useLocaltonetBrowser = process.env.GATEWAY_USE_LOCALTONET === 'true';
+
+    if (useLocaltonetBrowser && PROXY_HOST && PROXY_PORT) {
         Object.assign(prefs, {
             'network.proxy.type': 1,
             'network.proxy.socks': PROXY_HOST,
@@ -192,27 +182,23 @@ async function launchGatewayBrowser() {
         camoufoxOpts.firefoxUserPrefs = prefs;
         label = 'Proxy';
         gunakanProxy = true;
-    } else if (proxyMode === 'static' && STATIC_PROXY_HOST && STATIC_PROXY_PORT) {
+    } else if (BD_PROXY_HOST && BD_PROXY_PORT) {
         camoufoxOpts.geoip = true;
-        camoufoxOpts.firefoxUserPrefs = prefs;
+        camoufoxOpts.proxy = {
+            server: `http://${BD_PROXY_HOST}:${BD_PROXY_PORT}`,
+        };
+        if (BD_PROXY_USER) camoufoxOpts.proxy.username = BD_PROXY_USER;
+        if (BD_PROXY_PASS) camoufoxOpts.proxy.password = BD_PROXY_PASS;
+        label = 'BrightData';
+        gunakanProxy = true;
+    } else if (STATIC_PROXY_HOST && STATIC_PROXY_PORT) {
+        camoufoxOpts.geoip = true;
         camoufoxOpts.proxy = {
             server: `http://${STATIC_PROXY_HOST}:${STATIC_PROXY_PORT}`,
         };
         if (STATIC_PROXY_USER) camoufoxOpts.proxy.username = STATIC_PROXY_USER;
         if (STATIC_PROXY_PASS) camoufoxOpts.proxy.password = STATIC_PROXY_PASS;
         label = 'Static';
-        gunakanProxy = true;
-    } else if (proxyMode === 'smart' && BOT_PROXY_HOST && BOT_PROXY_PORT) {
-        // Smartproxy HTTP/SOCKS — ChatGPT fallback saat localtonet mati; geoip ON
-        const scheme = BOT_PROXY_TYPE === 'socks5' ? 'socks5' : 'http';
-        camoufoxOpts.geoip = true;
-        camoufoxOpts.firefoxUserPrefs = prefs;
-        camoufoxOpts.proxy = {
-            server: `${scheme}://${BOT_PROXY_HOST}:${BOT_PROXY_PORT}`,
-        };
-        if (BOT_PROXY_USER) camoufoxOpts.proxy.username = BOT_PROXY_USER;
-        if (BOT_PROXY_PASS) camoufoxOpts.proxy.password = BOT_PROXY_PASS;
-        label = 'Smart';
         gunakanProxy = true;
     } else {
         prefs['network.proxy.type'] = 0;
@@ -222,6 +208,7 @@ async function launchGatewayBrowser() {
         gunakanProxy = false;
     }
 
+    console.log(`[GATEWAY] launch browser net=${label} (proxyMode radar=${proxyMode})`);
     const browser = await Camoufox(camoufoxOpts);
     return { browser, label, gunakanProxy };
 }
