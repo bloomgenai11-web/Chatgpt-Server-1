@@ -1,10 +1,17 @@
 /**
- * qstash_deadman.js
+ * qstash_deadman.js — WORK EKOSISTEM
  * Gateway: const { startDeadman } = require('./qstash_deadman');
  *
  * Nama file HARUS qstash_deadman.js (bukan qtash_...).
  *
- * Delay 4 menit. Reset (cancel + publish) tiap 3,5 menit.
+ * Env (.env Codespace):
+ *   QSTASH_URL, QSTASH_TOKEN, WATCHDOG_URL
+ *   QSTASH_DELAY (default 4m), QSTASH_RESET_MS (default 210000)
+ *
+ * WATCHDOG_URL = base Cloudflare Worker (…workers.dev)
+ * Dest publish otomatis: WATCHDOG_URL/spawn
+ *
+ * Delay 4 menit. Reset (cancel + publish) tiap 3,5 menit selama gateway hidup.
  */
 
 function cleanToken(raw) {
