@@ -1,4 +1,4 @@
-const { Camoufox, isCamoufoxConfigError } = require('./camoufox_safe');
+const { Camoufox } = require('camoufox-js');
 const fs = require('fs');
 const path = require('path');
 const { Redis } = require('@upstash/redis');
@@ -8,31 +8,21 @@ require('dotenv').config({ path: path.join(__dirname, '.env') });
 const HEADLESS = process.env.HEADLESS !== 'false';
 const OUTPUT_FILE = path.join(__dirname, 'github_accounts.txt');
 
-// ====================== PROXY POLICY (GitHub) ======================
-// Prioritas GitHub:
-//   1) localtonet SOCKS5 (PROXY_HOST/PORT) — preferred saat nyala
-//   2) Smartproxy HTTP (BOT_PROXY_*) — fallback bila localtonet mati
-// Jika localtonet ON tapi IP ditolak GitHub (BAD_IP) → TAHAN proses,
-// tunggu IP localtonet berganti, jangan lompat ke Smartproxy.
-// AtomicMail = lokal, tanpa proxy.
-// ===================================================================
-const LOCAL_PROXY_HOST = process.env.PROXY_HOST || '';
-const LOCAL_PROXY_PORT = parseInt(process.env.PROXY_PORT || '0', 10);
-const LOCAL_PROXY_VERSION = parseInt(process.env.PROXY_VERSION || '5', 10);
-
+// Proxy untuk GitHub saja (Smartproxy / residential). AtomicMail = tanpa proxy.
+// Prioritas: BOT_PROXY_* ; fallback PROXY_* (legacy)
+// Proxy GitHub = Smartproxy saja (cara menang dari work.js). AtomicMail = tanpa proxy.
 const BOT_PROXY_HOST = process.env.BOT_PROXY_HOST || '';
 const BOT_PROXY_PORT = parseInt(process.env.BOT_PROXY_PORT || '0', 10);
 const BOT_PROXY_USER = process.env.BOT_PROXY_USER || '';
 const BOT_PROXY_PASS = process.env.BOT_PROXY_PASS || '';
 const BOT_PROXY_TYPE = (process.env.BOT_PROXY_TYPE || 'http').toLowerCase(); // socks5 | http
+const BOT_PROXY_VERSION = parseInt(process.env.BOT_PROXY_VERSION || '5', 10);
 
 const REDIS_QUEUE_KEY = process.env.REDIS_QUEUE_KEY || 'atomicmail:accounts';
 const MAX_PAT_STOCK = parseInt(process.env.MAX_PAT_STOCK || '4', 10);
 const SHIFTS_PER_PAT = parseInt(process.env.SHIFTS_PER_PAT || '24', 10);
 const GATE_POLL_MS = 30000;
 const IDLE_TIMEOUT_MINUTES = 240;
-const IP_ROTATE_POLL_MS = parseInt(process.env.IP_ROTATE_POLL_MS || '20000', 10);
-const IP_ROTATE_MAX_WAIT_MS = parseInt(process.env.IP_ROTATE_MAX_WAIT_MS || String(15 * 60 * 1000), 10);
 // ===========================================================
 
 const redis = new Redis({
@@ -76,6 +66,7 @@ async function appendPatToRedis(pat) {
   try {
     const len = await redis.rpush('github_pats', String(pat).trim());
     console.log(`[PAT] ✅ RPUSH github_pats. Total sekarang: ${len}`);
+    // kuota shift: SHIFTS_PER_PAT (default 24)
     try {
       const shifts = (await redis.get('pat_shift_quota')) || {};
       const obj = typeof shifts === 'object' && shifts !== null ? shifts : {};
@@ -92,70 +83,19 @@ async function appendPatToRedis(pat) {
 }
 
 /**
- * Probe: apakah localtonet SOCKS5 hidup? Return IP string atau null.
- * Pakai curl di shell (sama pola gateway) — cepat, tanpa buka browser.
+ * Proxy Playwright-format untuk browser GitHub saja (auth user/pass).
+ * Satu browser = satu sesi proxy = satu fingerprint Camoufox.
+ * AtomicMail TIDAK memakai ini.
  */
-function probeLocaltonetIp() {
-  return new Promise((resolve) => {
-    if (!LOCAL_PROXY_HOST || !LOCAL_PROXY_PORT) return resolve(null);
-    const { exec } = require('child_process');
-    const url = `socks5h://${LOCAL_PROXY_HOST}:${LOCAL_PROXY_PORT}`;
-    exec(`curl -s --max-time 12 -x "${url}" https://api.ipify.org`, (error, stdout) => {
-      if (error || !stdout || !String(stdout).trim()) resolve(null);
-      else resolve(String(stdout).trim());
-    });
-  });
-}
-
-/**
- * Tahan proses sampai IP localtonet berganti (atau timeout).
- * Dipakai saat BAD_IP di jalur localtonet — jangan lompat ke Smartproxy.
- */
-async function waitLocaltonetIpChange(oldIp) {
-  const start = Date.now();
-  console.log(`[PROXY] ⏳ Tahan proses. Tunggu IP localtonet berganti dari ${oldIp || '?'} ...`);
-  while (Date.now() - start < IP_ROTATE_MAX_WAIT_MS) {
-    await new Promise((r) => setTimeout(r, IP_ROTATE_POLL_MS));
-    const ip = await probeLocaltonetIp();
-    if (!ip) {
-      console.log('[PROXY] localtonet sementara tidak merespons, tetap tunggu...');
-      continue;
-    }
-    if (!oldIp || ip !== oldIp) {
-      console.log(`[PROXY] ✅ IP localtonet baru: ${ip}`);
-      return ip;
-    }
-    console.log(`[PROXY] IP masih ${ip}, tunggu lagi...`);
-  }
-  console.log('[PROXY] ⚠️ Timeout tunggu rotasi IP localtonet. Coba lagi dengan IP yang ada.');
-  return probeLocaltonetIp();
-}
-
-/**
- * Pilih proxy GitHub:
- * - localtonet hidup → pakai SOCKS5 (Playwright proxy opt)
- * - localtonet mati → Smartproxy HTTP
- * Return { opt, source, ip } atau null
- */
-async function resolveGithubProxy() {
-  const localIp = await probeLocaltonetIp();
-  if (localIp && LOCAL_PROXY_HOST && LOCAL_PROXY_PORT) {
-    return {
-      source: 'localtonet',
-      ip: localIp,
-      opt: {
-        server: `socks5://${LOCAL_PROXY_HOST}:${LOCAL_PROXY_PORT}`,
-      },
-    };
-  }
-  if (BOT_PROXY_HOST && BOT_PROXY_PORT) {
-    const scheme = BOT_PROXY_TYPE === 'socks5' ? 'socks5' : 'http';
-    const opt = { server: `${scheme}://${BOT_PROXY_HOST}:${BOT_PROXY_PORT}` };
-    if (BOT_PROXY_USER) opt.username = BOT_PROXY_USER;
-    if (BOT_PROXY_PASS) opt.password = BOT_PROXY_PASS;
-    return { source: 'smartproxy', ip: null, opt };
-  }
-  return null;
+function buildGithubProxyOption() {
+  if (!BOT_PROXY_HOST || !BOT_PROXY_PORT) return undefined;
+  const scheme = BOT_PROXY_TYPE === 'socks5' ? 'socks5' : 'http';
+  const opt = {
+    server: `${scheme}://${BOT_PROXY_HOST}:${BOT_PROXY_PORT}`,
+  };
+  if (BOT_PROXY_USER) opt.username = BOT_PROXY_USER;
+  if (BOT_PROXY_PASS) opt.password = BOT_PROXY_PASS;
+  return opt;
 }
 
 function buildGithubBasePrefs() {
@@ -170,7 +110,7 @@ function buildGithubBasePrefs() {
   };
 }
 
-/** Error: IP/proxy jelek — email dikembalikan ke antrian, coba lagi fingerprint+IP baru */
+/** IP/proxy jelek — email dikembalikan ke antrian */
 class BadIpError extends Error {
   constructor(message) {
     super(message);
@@ -179,7 +119,7 @@ class BadIpError extends Error {
   }
 }
 
-/** Error: email bermasalah — sudah di-LPOP, jangan dikembalikan */
+/** Email bermasalah setelah form email OK — jangan dikembalikan */
 class BadEmailError extends Error {
   constructor(message) {
     super(message);
@@ -197,14 +137,13 @@ async function ambilAkunDariRedis() {
   return { email: email.trim(), password: rest.join(':').trim() };
 }
 
-/** Kembalikan email ke antrian (depan) karena IP jelek */
 async function kembalikanEmailKeAntrian(email, password) {
   const item = `${email}:${password}`;
   try {
     await redis.lpush(REDIS_QUEUE_KEY, item);
-    console.log(`[Redis] ↩️ Email dikembalikan ke antrian (BAD_IP): ${email}`);
+    console.log(`[BAD_IP] Email dikembalikan ke antrian: ${email}`);
   } catch (e) {
-    console.log(`[Redis] ❌ Gagal kembalikan email: ${e.message}`);
+    console.log(`[BAD_IP] Gagal LPUSH email: ${e.message}`);
   }
 }
 
@@ -373,18 +312,8 @@ async function buatSatuAkunGitHub(atomicEmail, atomicPassword) {
   const password = randomPassword();
   let username = randomUsername();
 
-  // Satu akun = satu browser = satu sesi proxy = satu fingerprint Camoufox
-  // Paritas script awal: geoip ON wajib untuk GitHub, pool BrowserForge penuh (no forced os).
-  // Prioritas: localtonet → Smartproxy. BAD_IP di localtonet = tahan sampai IP ganti.
-  const resolved = await resolveGithubProxy();
-  if (!resolved || !resolved.opt) {
-    throw new BadIpError('Tidak ada proxy GitHub (localtonet mati + BOT_PROXY_* kosong)');
-  }
-  let proxySource = resolved.source;
-  let proxyIp = resolved.ip;
-  const proxyOpt = resolved.opt;
-  console.log(`[PROXY] sumber=${proxySource}` + (proxyIp ? ` ip=${proxyIp}` : ''));
-
+  // Satu akun = satu browser = satu sesi proxy = satu fingerprint Camoufox (work.js)
+  const proxyOpt = buildGithubProxyOption();
   let browser;
   let context;
   let page;
@@ -393,32 +322,24 @@ async function buatSatuAkunGitHub(atomicEmail, atomicPassword) {
       headless: HEADLESS,
       width: 1280,
       height: 720,
-      geoip: true, // wajib ON untuk GitHub (paritas script awal)
+      geoip: !!proxyOpt,
       proxy: proxyOpt,
-      firefoxUserPrefs: buildGithubBasePrefs(),
+      firefoxUserPrefs: buildGithubBasePrefs()
     });
     context = await browser.newContext();
     page = await context.newPage();
   } catch (e) {
     if (browser) await browser.close().catch(() => {});
-    const err = new BadIpError(`Gagal launch Camoufox (bukan email): ${e.message}`);
-    err.proxySource = proxySource;
-    err.proxyIp = proxyIp;
-    throw err;
+    throw new BadIpError(`Gagal launch Camoufox: ${e.message}`);
   }
 
   try {
     console.log('🌐 Cek IP proxy...');
     try {
       await page.goto('https://api.ipify.org', { waitUntil: 'domcontentloaded', timeout: 20000 });
-      const liveIp = (await page.innerText('body')).trim();
-      proxyIp = liveIp || proxyIp;
-      console.log(`✅ IP: ${proxyIp} (via ${proxySource})`);
+      console.log(`✅ IP: ${await page.innerText('body')}`);
     } catch (e) {
-      const err = new BadIpError(`Proxy tidak bisa reach ipify: ${e.message}`);
-      err.proxySource = proxySource;
-      err.proxyIp = proxyIp;
-      throw err;
+      throw new BadIpError(`Gagal ipify: ${e.message}`);
     }
 
     console.log('🌐 github.com/signup...');
@@ -426,52 +347,21 @@ async function buatSatuAkunGitHub(atomicEmail, atomicPassword) {
       await page.goto('https://github.com/signup', { waitUntil: 'networkidle', timeout: 60000 });
       await page.waitForTimeout(2000);
     } catch (e) {
-      const err = new BadIpError(`Gagal buka signup (IP?): ${e.message}`);
-      err.proxySource = proxySource;
-      err.proxyIp = proxyIp;
-      throw err;
+      throw new BadIpError(`Gagal buka signup: ${e.message}`);
     }
 
-    // --- Fase email: gagal di sini = BAD_IP (kembalikan email, fingerprint+IP baru) ---
     console.log('✍️  email...');
     try {
-      const emailEl = page.locator('#email');
-      await emailEl.waitFor({ state: 'visible', timeout: 20000 });
       await humanType(page, '#email', atomicEmail);
-      const emailOk = await waitForSuccess(page, '#email');
-      console.log(emailOk ? '✅ email' : '⚠️ email (lanjut)');
+      console.log((await waitForSuccess(page, '#email')) ? '✅ email' : '⚠️ email');
     } catch (e) {
-      const stamp = Date.now();
-      const safe = atomicEmail.replace(/[^a-zA-Z0-9]/g, '_');
-      const shot = path.join(__dirname, `error_email_${safe}_${stamp}.png`);
-      const htmlPath = path.join(__dirname, `error_email_${safe}_${stamp}.html`);
-      try {
-        await page.screenshot({ path: shot, fullPage: true });
-        console.log(`[BAD_IP] screenshot: ${shot}`);
-      } catch (ssErr) {
-        console.log(`[BAD_IP] screenshot gagal: ${ssErr.message}`);
-      }
-      try {
-        const html = await page.content();
-        fs.writeFileSync(htmlPath, html);
-        console.log(`[BAD_IP] html: ${htmlPath}`);
-      } catch {}
-      const title = await page.title().catch(() => '');
-      console.log(`[BAD_IP] URL=${page.url()} title=${title}`);
-      const err = new BadIpError(`Gagal isi/lihat kolom email (IP jelek?): ${e.message}`);
-      err.proxySource = proxySource;
-      err.proxyIp = proxyIp;
-      throw err;
+      throw new BadIpError(`Gagal isi/lihat kolom email: ${e.message}`);
     }
-    // Email sudah masuk kolom → kegagalan setelah ini = BAD_EMAIL
+    // setelah email form → BadEmail
 
     console.log('✍️  password...');
-    try {
-      await humanType(page, '#password', password);
-      console.log((await waitForSuccess(page, '#password')) ? '✅ password' : '⚠️ password');
-    } catch (e) {
-      throw new BadEmailError(`Gagal isi password: ${e.message}`);
-    }
+    await humanType(page, '#password', password);
+    console.log((await waitForSuccess(page, '#password')) ? '✅ password' : '⚠️ password');
 
     console.log('✍️  username...');
     await humanType(page, '#login', username);
@@ -661,9 +551,6 @@ async function buatSatuAkunGitHub(atomicEmail, atomicPassword) {
     const safe = atomicEmail.replace(/[^a-zA-Z0-9]/g, '_');
     if (page) await page.screenshot({ path: `error_${safe}.png` }).catch(() => {});
     if (err instanceof BadIpError || err instanceof BadEmailError) throw err;
-    if (err.code === 'BAD_IP' || isCamoufoxConfigError(err)) {
-      throw new BadIpError(err.message || String(err));
-    }
     throw new BadEmailError(err.message || String(err));
   } finally {
     if (!HEADLESS && page) {
@@ -679,23 +566,16 @@ async function main() {
     console.error('❌ Isi UPSTASH_REDIS_* di .env');
     process.exit(1);
   }
-  const hasLocal = !!(LOCAL_PROXY_HOST && LOCAL_PROXY_PORT);
-  const hasSmart = !!(BOT_PROXY_HOST && BOT_PROXY_PORT);
-  if (!hasLocal && !hasSmart) {
-    console.error('❌ Isi PROXY_HOST/PORT (localtonet) dan/atau BOT_PROXY_* (Smartproxy)');
+  if (!BOT_PROXY_HOST || !BOT_PROXY_PORT) {
+    console.error('❌ Isi BOT_PROXY_HOST / BOT_PROXY_PORT di .env (proxy khusus GitHub)');
     process.exit(1);
   }
 
-  console.log(`[Proxy GitHub] prioritas: localtonet SOCKS5 → Smartproxy HTTP`);
-  console.log(`  localtonet: ${hasLocal ? `${LOCAL_PROXY_HOST}:${LOCAL_PROXY_PORT}` : '(tidak diset)'}`);
-  console.log(`  smartproxy: ${hasSmart ? `${BOT_PROXY_TYPE} ${BOT_PROXY_HOST}:${BOT_PROXY_PORT}` : '(tidak diset)'}` +
+  console.log(`[Bot proxy] ${BOT_PROXY_TYPE} ${BOT_PROXY_HOST}:${BOT_PROXY_PORT}` +
     (BOT_PROXY_USER ? ` user=${BOT_PROXY_USER}` : ''));
-  console.log(`[BAD_IP] jika localtonet: tahan sampai IP berganti (poll ${IP_ROTATE_POLL_MS / 1000}s, max ${IP_ROTATE_MAX_WAIT_MS / 60000}m)`);
-  console.log(`[Gate] PAT < ${MAX_PAT_STOCK} | AtomicMail = lokal`);
+  console.log(`[Gate] PAT < ${MAX_PAT_STOCK} | SHIFTS_PER_PAT=${SHIFTS_PER_PAT} | AtomicMail = lokal`);
   console.log(`[Email] Redis list: ${REDIS_QUEUE_KEY}`);
   console.log(`[Idle] ${IDLE_TIMEOUT_MINUTES} menit`);
-  console.log(`[Fingerprint] camoufox_safe | geoip=ON (GitHub) | no forced os | pool penuh`);
-  console.log(`[AtomicMail] lokal | geoip=OFF | proxy=OFF`);
 
   let index = 0;
   while (true) {
@@ -714,7 +594,7 @@ async function main() {
       break;
     }
 
-    // 3) ambil email
+    // 3) ambil email (tidak ada limit IP)
     const akun = await ambilAkunDariRedis();
     if (!akun) {
       console.log('[Redis] LPOP kosong. Selesai.');
@@ -727,22 +607,14 @@ async function main() {
 
     try {
       // Satu panggilan = satu browser GitHub (proxy) + satu browser AtomicMail (lokal)
-      // Browser ditutup di finally → fingerprint baru di percobaan berikutnya
       await buatSatuAkunGitHub(akun.email, akun.password);
     } catch (e) {
-      if (e instanceof BadIpError || e.code === 'BAD_IP' || isCamoufoxConfigError(e)) {
+      if (e instanceof BadIpError || e.code === 'BAD_IP') {
         console.error(`[BAD_IP] ${akun.email} → ${e.message}`);
         await kembalikanEmailKeAntrian(akun.email, akun.password);
-        // Jika gagal di localtonet: TAHAN sampai IP berganti (jangan pakai Smartproxy dulu)
-        if (e.proxySource === 'localtonet') {
-          await waitLocaltonetIpChange(e.proxyIp);
-        } else {
-          console.log('[BAD_IP] Kembalikan email, jeda singkat, fingerprint/IP baru...');
-          await new Promise((r) => setTimeout(r, 5000));
-        }
+        await new Promise(r => setTimeout(r, 5000));
         continue;
       }
-      // BAD_EMAIL atau lainnya: email sudah ter-LPOP, lanjut email berikutnya
       console.error(`[BAD_EMAIL/SKIP] ${akun.email} → ${e.message}`);
     }
 
