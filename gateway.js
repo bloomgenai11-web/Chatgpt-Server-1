@@ -3,7 +3,7 @@ const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 const { spawn, exec } = require('child_process');
-const { Camoufox } = require('camoufox-js');
+const { launchCamoufox } = require('./camoufox_launch');
 const { Redis } = require('@upstash/redis');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 const chatgptModule = require('./platforms/chatgpt');
@@ -209,7 +209,13 @@ async function launchGatewayBrowser() {
     }
 
     console.log(`[GATEWAY] launch browser net=${label} (proxyMode radar=${proxyMode})`);
-    const browser = await Camoufox(camoufoxOpts);
+    // Hindari BrowserForge navigator.product error TANPA camoufox_safe:
+    // i_know_what_im_doing + biarkan fingerprint default OS firefox saja
+    const browser = await launchCamoufox({
+        ...camoufoxOpts,
+        block_images: false,
+        humanize: false,
+    });
     return { browser, label, gunakanProxy };
 }
 

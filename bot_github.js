@@ -1,4 +1,4 @@
-const { Camoufox } = require('camoufox-js');
+const { launchCamoufox } = require('./camoufox_launch');
 const fs = require('fs');
 const path = require('path');
 const { Redis } = require('@upstash/redis');
@@ -197,11 +197,13 @@ async function waitForSuccess(page, selector, timeout = 15000) {
 // ====================== ATOMICMAIL LOKAL (tanpa proxy) ======================
 async function loginAtomicMailLocal(email, password) {
   console.log(`[AtomicMail/LOCAL] Login ${email}...`);
-  const browser = await Camoufox({
+  const browser = await launchCamoufox({
     headless: HEADLESS,
     width: 1280,
     height: 720,
     geoip: false,
+    i_know_what_im_doing: true,
+    humanize: false,
     firefoxUserPrefs: {
       'webgl.force-enabled': true,
       'network.proxy.type': 0,
@@ -318,13 +320,15 @@ async function buatSatuAkunGitHub(atomicEmail, atomicPassword) {
   let context;
   let page;
   try {
-    browser = await Camoufox({
+    browser = await launchCamoufox({
       headless: HEADLESS,
       width: 1280,
       height: 720,
       geoip: !!proxyOpt,
       proxy: proxyOpt,
-      firefoxUserPrefs: buildGithubBasePrefs()
+      firefoxUserPrefs: buildGithubBasePrefs(),
+      i_know_what_im_doing: true,
+      humanize: false,
     });
     context = await browser.newContext();
     page = await context.newPage();

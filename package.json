@@ -1,0 +1,16 @@
+{
+  "name": "work-ekosistem-fix",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Pinned Camoufox stack \u2014 fix navigator.product without camoufox_safe disk patch",
+  "dependencies": {
+    "@upstash/redis": "1.34.3",
+    "camoufox-js": "0.12.0",
+    "cors": "2.8.5",
+    "dotenv": "16.4.7",
+    "express": "4.21.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
