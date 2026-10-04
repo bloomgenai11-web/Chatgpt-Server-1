@@ -159,6 +159,19 @@ const EXTRA = [
   { property: 'navigator.globalPrivacyControl', type: 'bool' },
   { property: 'navigator.cookieEnabled', type: 'bool' },
   { property: 'navigator.onLine', type: 'bool' },
+  { property: 'navigator.appCodeName', type: 'str' },
+  { property: 'navigator.appName', type: 'str' },
+  { property: 'navigator.appVersion', type: 'str' },
+  { property: 'navigator.vendor', type: 'str' },
+  { property: 'navigator.vendorSub', type: 'str' },
+  { property: 'navigator.doNotTrack', type: 'str' },
+  { property: 'navigator.oscpu', type: 'str' },
+  { property: 'navigator.hardwareConcurrency', type: 'uint' },
+  { property: 'navigator.maxTouchPoints', type: 'uint' },
+  { property: 'navigator.platform', type: 'str' },
+  { property: 'navigator.userAgent', type: 'str' },
+  { property: 'navigator.language', type: 'str' },
+  { property: 'navigator.languages', type: 'array' },
 ];
 function walk(d, depth, acc) {
   if (!d || depth > 6) return;
@@ -194,6 +207,50 @@ for (const f of files) {
 }
 console.log('[setup] properties.json patched files=' + n);
 NODEPATCH
+
+# Soft-patch: Unknown property → skip (bukan throw) di camoufox-js validateConfig
+node << 'NODEVAL' || true
+const fs = require('fs');
+const path = require('path');
+function walk(d, depth, acc) {
+  if (!d || depth > 8) return;
+  let e; try { e = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+  for (const x of e) {
+    const p = path.join(d, x.name);
+    if (x.isDirectory()) {
+      if (x.name === '.git') continue;
+      walk(p, depth + 1, acc);
+    } else if (x.isFile() && /\.(js|cjs|mjs)$/.test(x.name)) acc.push(p);
+  }
+}
+const roots = [];
+try { roots.push(path.dirname(require.resolve('camoufox-js/package.json'))); } catch {}
+roots.push(path.join(process.cwd(), 'node_modules', 'camoufox-js'));
+const files = [];
+for (const r of roots) walk(r, 0, files);
+let n = 0;
+for (const f of files) {
+  let src;
+  try { src = fs.readFileSync(f, 'utf8'); } catch { continue; }
+  if (!src.includes('Unknown property') || !/validateConfig/.test(src)) continue;
+  let next = src.replace(
+    /if\s*\(\s*!expectedType\s*\)\s*\{\s*throw new UnknownProperty\([^)]*\);\s*\}/g,
+    'if (!expectedType) { continue; }'
+  );
+  if (next === src) {
+    next = src.replace(
+      /throw new UnknownProperty\(`Unknown property \$\{key\} in config`\)/g,
+      'continue'
+    );
+  }
+  if (next !== src) {
+    fs.writeFileSync(f, next);
+    n++;
+    console.log('[setup] validateConfig patched', f);
+  }
+}
+console.log('[setup] validateConfig patched files=' + n);
+NODEVAL
 
 echo "[setup] 5/5 runtime folders..."
 mkdir -p "$ROOT/hasil_media" "$ROOT/temp_uploads" "$ROOT/.devcontainer"
