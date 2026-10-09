@@ -44,6 +44,30 @@ async function stepShot(page, folderHasil, label) {
 }
 
 // =====================================================================
+// 🧹 KLIK GOT IT / MENGERTI (Playwright — andal untuk React)
+// =====================================================================
+async function klikGotItJikaAda(page) {
+    try {
+        const loc = page.locator(
+            'button:has-text("Got it"), button:has-text("Mengerti"), button:has-text("Saya mengerti"), button:has-text("Okay"), button:has-text("OK"), [role="dialog"] button.btn-primary, [role="dialog"] button[class*="btn-primary"]'
+        );
+        const count = await loc.count();
+        let n = 0;
+        for (let i = 0; i < Math.min(count, 5); i++) {
+            const b = loc.nth(i);
+            if (await b.isVisible().catch(() => false)) {
+                await b.click({ timeout: 1500 }).catch(() => {});
+                n++;
+            }
+        }
+        if (n > 0) console.log(`[CHATGPT] 🧹 Klik dismiss popup x${n}`);
+        return n;
+    } catch (_) {
+        return 0;
+    }
+}
+
+// =====================================================================
 // 👤 TUNGGU PROFIL SIAP (dari Script 2)
 // =====================================================================
 async function tungguProfilSiap(page, timeoutMs = 45000) {
@@ -135,6 +159,16 @@ async function tungguProfilSiap(page, timeoutMs = 45000) {
             }
         }
 
+        // Playwright klik Got it / Mengerti (NUX sering muncul di fase ini)
+        try {
+            const loc = page.locator('button:has-text("Got it"), button:has-text("Mengerti"), [role="dialog"] button.btn-primary');
+            const count = await loc.count();
+            for (let i = 0; i < Math.min(count, 3); i++) {
+                const b = loc.nth(i);
+                if (await b.isVisible().catch(() => false)) await b.click({ timeout: 1200 }).catch(() => {});
+            }
+        } catch (_) {}
+
         if (Date.now() - lastLog > 2500) {
             lastLog = Date.now();
             console.log(`[CHATGPT] profil… ${Date.now() - t0}ms hasBtn=${info.hasBtn} img=${info.hasImg}`);
@@ -186,18 +220,24 @@ async function eksekusiChatGPT(tipeTugas, promptTeks, isThinkingMode, fileInputD
 
     // 🌟 SISTEM PEMBUNUH POP-UP OTONOM (selalu nyala, termasuk memory NUX)
     await page.addInitScript(() => {
+        const isDismissLabel = (raw) => {
+            const t = (raw || '').replace(/\s+/g, ' ').trim().toLowerCase();
+            return (
+                t === 'got it' ||
+                t === 'mengerti' ||
+                t === 'saya mengerti' ||
+                t === 'baik' ||
+                t === 'okay' ||
+                t === 'ok' ||
+                t === 'continue' ||
+                t === 'lanjutkan' ||
+                t === 'stay logged out' ||
+                t === '知道了'
+            );
+        };
         const dismissPopups = () => {
-            const btns = document.querySelectorAll('button');
-            for (const btn of btns) {
-                const txt = (btn.textContent || '').trim().toLowerCase();
-                if (
-                    txt === 'got it' ||
-                    txt === '知道了' ||
-                    txt === 'okay' ||
-                    txt === 'ok' ||
-                    txt === 'stay logged out' ||
-                    txt === 'continue'
-                ) {
+            document.querySelectorAll('button, [role="button"]').forEach((btn) => {
+                if (isDismissLabel(btn.textContent || btn.innerText)) {
                     try { btn.click(); } catch (e) {}
                 }
                 if (
@@ -206,32 +246,27 @@ async function eksekusiChatGPT(tipeTugas, promptTeks, isThinkingMode, fileInputD
                 ) {
                     try { btn.click(); } catch (e) {}
                 }
-            }
-
-            // Dialog radix / memory NUX: "More relevant, personalized replies"
-            document.querySelectorAll('[role="dialog"]').forEach((d) => {
+            });
+            document.querySelectorAll('[role="dialog"], [data-state="open"]').forEach((d) => {
                 const t = d.innerText || '';
-                if (
-                    t.includes('More relevant') ||
-                    t.includes('personalized replies') ||
-                    t.includes('个性化') ||
-                    t.includes('already uploaded')
-                ) {
+                if (/more relevant|personalized replies|个性化|already uploaded|memori|memory/i.test(t)) {
                     const gotIt = Array.from(d.querySelectorAll('button')).find((b) =>
-                        /^\s*got it\s*$/i.test((b.textContent || '').trim())
+                        isDismissLabel(b.textContent || b.innerText)
                     );
-                    if (gotIt) {
-                        try { gotIt.click(); } catch (e) {}
-                    } else {
-                        try { d.remove(); } catch (e) {}
+                    const primary = gotIt || d.querySelector('button.btn-primary, button[class*="btn-primary"]');
+                    if (primary) {
+                        try { primary.click(); } catch (e) {}
                     }
                 }
             });
         };
 
-        const observer = new MutationObserver(() => dismissPopups());
-        observer.observe(document.documentElement, { childList: true, subtree: true });
-        setInterval(dismissPopups, 800);
+        if (!window.__chatgptPopupKillerInstalled) {
+            window.__chatgptPopupKillerInstalled = true;
+            const observer = new MutationObserver(() => dismissPopups());
+            observer.observe(document.documentElement, { childList: true, subtree: true });
+            setInterval(dismissPopups, 600);
+        }
         dismissPopups();
     });
 
@@ -249,6 +284,7 @@ async function eksekusiChatGPT(tipeTugas, promptTeks, isThinkingMode, fileInputD
         // ---------------------------------------------------------
         await tungguProfilSiap(page, 45000);
         await stepShot(page, folderHasil, '02_after_profile');
+        await klikGotItJikaAda(page);
 
         // ---------------------------------------------------------
         // 3) Tunggu composer (dari Local)
@@ -256,6 +292,7 @@ async function eksekusiChatGPT(tipeTugas, promptTeks, isThinkingMode, fileInputD
         await tungguComposerSiap(page, 60000);
         await stepShot(page, folderHasil, '03_composer_ready');
         await page.waitForTimeout(800);
+        await klikGotItJikaAda(page);
 
         if (isThinkingMode) {
             console.log(`[CHATGPT] 🧠 Mengaktifkan Thinking Mode...`);
@@ -489,6 +526,7 @@ async function eksekusiChatGPT(tipeTugas, promptTeks, isThinkingMode, fileInputD
             };
         });
 
+        await klikGotItJikaAda(page);
         console.log(`[CHATGPT] ⚡ Menyuntikkan Prompt...`);
         const textarea = page.locator('#prompt-textarea');
         await textarea.focus();
