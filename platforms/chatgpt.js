@@ -115,10 +115,29 @@ async function tungguProfilSiap(page, timeoutMs = 45000) {
                 break;
             }
         }
+        // Soft: tombol profil sudah ada + composer terlihat (avatar kadang lambat)
+        if (info.hasBtn && Date.now() - t0 > 15000) {
+            const composerOk = await page.evaluate(() => {
+                const a = document.querySelector('#prompt-textarea');
+                if (a) {
+                    const st = window.getComputedStyle(a);
+                    if (st && st.display !== 'none' && st.visibility !== 'hidden') return true;
+                }
+                return !!(
+                    document.querySelector('[data-testid="prompt-textarea"]') ||
+                    document.querySelector('div.ProseMirror[contenteditable="true"]')
+                );
+            }).catch(() => false);
+            if (composerOk) {
+                ok = true;
+                console.log(`[CHATGPT] ✅ Profil soft (btn+composer) ${Date.now() - t0}ms`);
+                break;
+            }
+        }
 
         if (Date.now() - lastLog > 2500) {
             lastLog = Date.now();
-            console.log(`[CHATGPT] profil… ${Date.now() - t0}ms`);
+            console.log(`[CHATGPT] profil… ${Date.now() - t0}ms hasBtn=${info.hasBtn} img=${info.hasImg}`);
         }
         await page.waitForTimeout(300);
     }
