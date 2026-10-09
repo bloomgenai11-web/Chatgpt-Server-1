@@ -1,0 +1,16 @@
+{
+  "ready": false,
+  "photo_path": "",
+  "photo_path_2": "",
+  "seed_image": "",
+  "date": "",
+  "seed_slot": "",
+  "camera_used": "",
+  "device_photographed": "",
+  "capture_variant": "",
+  "moire_pixel_grid": false,
+  "screen_glare_hotspots": false,
+  "perspective_keystone_distortion": false,
+  "gamma_contrast_shift": false,
+  "edge_crop_cues": false
+}

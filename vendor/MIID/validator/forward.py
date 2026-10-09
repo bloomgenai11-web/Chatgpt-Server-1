@@ -1,0 +1,1146 @@
+# forward.py
+
+# The MIT License (MIT)
+# Copyright © 2023 Yuma Rao
+# TODO(developer): YANEZ - MIID Team
+# Copyright © 2025 YANEZ
+
+# Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
+# documentation files (the "Software"), to deal in the Software without restriction, including without limitation
+# the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software,
+# and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+# The above copyright notice and this permission notice shall be included in all copies or substantial portions of
+# the Software.
+
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO
+# THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+# THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+# OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+# DEALINGS IN THE SOFTWARE.
+
+"""
+Validator Forward Module
+
+Implements the forward function that drives each validation round:
+1. Select random miners to query.
+2. Fetch a base face image from the MIID API.
+3. Build an ImageRequest with three images: the per-round face-variation
+   base, today's IOTD, and tomorrow's IOTD (both IOTDs from the API fixed
+   pool). 5 synthetic variations: background_in, background_out, 3 combined
+   edits; plus
+   the IOTD seeds + instructions for the REAL screen-replay task —
+   miners may send as many non-duplicate real captures as they want, each one
+   bundling a face close-up + environment shot of the same capture as basic
+   proof it's real).
+4. Send the request to miners in batches; collect S3 submission references.
+5. Grade submissions via the external grading API (KAV) using
+   get_image_variation_rewards().
+6. Combine KAV scores with reputation (UAV) via apply_reputation_rewards()
+   — unqueried miners still receive UAV and are listed for reputation decay.
+7. Update miner weights and upload results to the MIID server.
+"""
+
+import time
+import shutil
+import bittensor as bt
+import json
+import os
+import asyncio
+from typing import List, Dict, Any, Optional
+from datetime import datetime
+from pathlib import Path
+
+from MIID.protocol import IdentitySynapse, ImageRequest, VariationRequest
+from MIID.validator.reward import get_image_variation_rewards, apply_reputation_rewards
+from MIID.utils.uids import get_random_uids
+from MIID.utils.sign_message import sign_message
+
+from MIID.validator.base_images import fetch_image_from_api
+from MIID.validator.fixed_images import (
+    ensure_daily_fixed_image,
+    load_seed_pair_base64,
+    list_fixed_image_pool,
+    VALIDATOR_SENDS_SEED_IMAGE,
+)
+from MIID.validator.drand_utils import (
+    calculate_target_round,
+    calculate_reveal_buffer,
+    REVEAL_DELAY_SECONDS,
+    wait_until_reveal,
+)
+from MIID.validator.image_variations import (
+    build_standard_challenge_variations,
+    format_variation_requirements,
+    format_real_screen_replay_instructions,
+    validate_screen_replay_uav,
+    IMAGE_VARIATION_REQUIREMENTS,
+)
+
+
+# Import your new upload_data function here
+from MIID.utils.misc import upload_data
+
+# =============================================================================
+# Reputation Cache (persists across forward passes)
+# =============================================================================
+
+# Module-level cache for reputation data (persists across forward passes)
+_cached_rep_data: Dict[str, Dict] = {}
+_cached_rep_version: Optional[str] = None
+
+# Module-level pending queue for failed uploads (persists across forward passes)
+_pending_allocations: List[Dict] = []
+_pending_file_path: Optional[Path] = None
+
+# NOTE: Screen-replay policy is "send as many non-duplicate real captures as
+# you want" — there is no daily cap. Each submission must carry 2 photos of
+# the same capture: (1) face close-up in primary fields, (2) environment
+# shot in s3_key_angle2 (see S3Submission in MIID/protocol.py). Actual
+# duplicate-detection (dedup by image hash across a miner's submission
+# history) is intentionally not implemented yet — not needed while this
+# task is still experimental. Miners can be advised informally not to
+# resubmit the same capture; a real check can be added here later once
+# manual review volume becomes a concern.
+
+# =============================================================================
+# Phase 4: Image Cycling State
+# =============================================================================
+# Tracks the current position in the image cycle only.
+# Global index advances by 1 per forward pass and selects `image_index`.
+
+_phase4_global_index: int = 0
+_phase4_state_file_path: Optional[Path] = None
+
+
+def _load_phase4_state(file_path: Path) -> int:
+    """Load the Phase 4 global index from disk on startup."""
+    if file_path.exists():
+        try:
+            with open(file_path, 'r') as f:
+                data = json.load(f)
+                return data.get("global_index", 0)
+        except Exception:
+            return 0
+    return 0
+
+
+def _save_phase4_state(file_path: Path, global_index: int):
+    """Save the Phase 4 global index to disk."""
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(file_path, 'w') as f:
+        json.dump({"global_index": global_index}, f)
+
+
+def reset_phase4_state(file_path: Path) -> None:
+    """Reset Phase 4 cycle state to 0 so the next forward starts with image index 0."""
+    file_path = Path(file_path)
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(file_path, 'w') as f:
+        json.dump({"global_index": 0}, f)
+    bt.logging.info("Phase 4: Reset state to global_index=0 (cycle starts with background variation)")
+
+
+def _load_pending_allocations(file_path: Path) -> List[Dict]:
+    """Load pending allocations from disk on startup."""
+    if file_path.exists():
+        try:
+            with open(file_path, 'r') as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+
+def _save_pending_allocations(file_path: Path, pending: List[Dict]):
+    """Save pending allocations to disk."""
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(file_path, 'w') as f:
+        json.dump(pending, f, indent=2)
+
+
+def _clear_pending_allocations(file_path: Path):
+    """Clear pending after successful send (overwrite with empty array)."""
+    _save_pending_allocations(file_path, [])
+
+
+def _collect_screen_replay_data(
+    requested: bool,
+    instructions: Optional[str],
+    image_request: Optional[ImageRequest],
+    seed_pool: List[str],
+    miner_uids: List[int],
+    s3_submissions_by_miner: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Build the top-level screen_replay_data block for the results JSON.
+
+    Mirrors the old Phase-3 `uav_data` shape: record that we asked for the
+    task, which image-of-the-day was the seed, how many miners uploaded, and
+    the per-miner payloads.
+    """
+    by_miner: Dict[str, Any] = {}
+    total_submissions = 0
+    miners_with_env = 0
+    miners_with_uav = 0
+    miners_with_valid_uav = 0
+    rejected = 0
+
+    for uid_str, miner_block in s3_submissions_by_miner.items():
+        sr_subs = []
+        miner_has_env = False
+        miner_has_uav = False
+        miner_has_valid_uav = False
+        for sub in miner_block.get("submissions", []):
+            if sub.get("variation_type") != "screen_replay":
+                continue
+            uav = sub.get("screen_replay_uav")
+            uav_valid = bool(uav is not None and validate_screen_replay_uav(uav))
+            if sub.get("s3_key_angle2"):
+                miner_has_env = True
+            if uav is not None:
+                miner_has_uav = True
+            if uav_valid:
+                miner_has_valid_uav = True
+            sr_subs.append({
+                "s3_key": sub.get("s3_key"),
+                "s3_key_angle2": sub.get("s3_key_angle2"),
+                "uav_valid": uav_valid,
+            })
+        if not sr_subs:
+            continue
+        total_submissions += len(sr_subs)
+        if miner_has_env:
+            miners_with_env += 1
+        if miner_has_uav:
+            miners_with_uav += 1
+        if miner_has_valid_uav:
+            miners_with_valid_uav += 1
+        rejected += sum(1 for s in sr_subs if not s["uav_valid"])
+        by_miner[uid_str] = {
+            "hotkey": miner_block.get("hotkey"),
+            "submission_count": len(sr_subs),
+            "submissions": sr_subs,
+        }
+
+    today = {
+        "filename": image_request.daily_seed_filename if image_request else None,
+        "date": image_request.daily_seed_date if image_request else None,
+    }
+    tomorrow = {
+        "filename": image_request.tomorrow_seed_filename if image_request else None,
+        "date": image_request.tomorrow_seed_date if image_request else None,
+    }
+
+    return {
+        "requested": requested,
+        "cycle": "Phase4-C5-Execution",
+        "note": (
+            "Real screen-replay is requested every round (physical capture, "
+            "not a FLUX synthetic). Miners may upload as many non-duplicate "
+            "captures as they want; this block records what we asked and who uploaded."
+        ),
+        "instructions": instructions,
+        "image_of_the_day": {
+            "today": today,
+            "tomorrow": tomorrow,
+            "seed_pool": list(seed_pool) if seed_pool else [],
+        },
+        "miners_queried": len(miner_uids),
+        "summary": {
+            "total_miners_with_screen_replay": len(by_miner),
+            "total_screen_replays_collected": total_submissions,
+            "miners_with_environment_shot": miners_with_env,
+            "miners_with_uav": miners_with_uav,
+            "miners_with_valid_uav": miners_with_valid_uav,
+            "rejected_screen_replays": rejected,
+        },
+        "by_miner": by_miner,
+    }
+
+# =============================================================================
+
+EPOCH_MIN_TIME = 360  # seconds
+MIID_SERVER = "http://52.44.186.20:5000/upload_data"
+UPLOAD_RETRY_ATTEMPTS = 3
+UPLOAD_RETRY_DELAY_SECONDS = 60
+
+PHASE4_ENABLED = True
+
+
+async def dendrite_with_retries(
+    dendrite: bt.Dendrite,
+    axons: list,
+    synapse: IdentitySynapse,
+    deserialize: bool,
+    timeout: float,
+    cnt_attempts: int = 3,
+):
+    """
+    Send requests to miners with automatic retry logic for failed connections.
+
+    Args:
+        dendrite:     The dendrite object to use for communication.
+        axons:        List of axons to query.
+        synapse:      The synapse object containing the request.
+        deserialize:  Whether to deserialize the response.
+        timeout:      Timeout per attempt in seconds.
+        cnt_attempts: Number of retry attempts for failed connections.
+
+    Returns:
+        List of IdentitySynapse responses from miners.
+    """
+    res = [None] * len(axons)
+    idx = list(range(len(axons)))
+    axons_for_retry = axons.copy()
+    
+    def create_default_response():
+        return IdentitySynapse(
+            image_request=synapse.image_request,
+            s3_submissions=[],
+            process_time=None,
+        )
+    
+    for attempt in range(cnt_attempts):
+        responses = await dendrite(
+            axons=axons_for_retry,
+            synapse=synapse,
+            deserialize=deserialize,
+            timeout=timeout * (1 + attempt * 0.1),
+        )
+        
+        new_idx = []
+        new_axons = []
+        
+        for i, response in enumerate(responses):
+            process_time = None
+            if hasattr(response, "dendrite") and hasattr(response.dendrite, "process_time"):
+                try:
+                    process_time = float(response.dendrite.process_time)
+                except (ValueError, TypeError):
+                    process_time = None
+
+            if hasattr(response, 'dendrite'):
+                if (response.dendrite.status_code is not None
+                        and int(response.dendrite.status_code) == 422):
+                    if attempt == cnt_attempts - 1:
+                        res[idx[i]] = response
+                    else:
+                        new_idx.append(idx[i])
+                        new_axons.append(axons_for_retry[i])
+                else:
+                    response.process_time = process_time  # <-- attach it
+                    res[idx[i]] = response
+            
+            else:
+                if hasattr(response, 's3_submissions'):
+                    response.process_time = process_time
+                    res[idx[i]] = response
+                else:
+                    # Retry or assign default
+                    if attempt == cnt_attempts - 1:
+                        res[idx[i]] = create_default_response()
+                    else:
+                        new_idx.append(idx[i])
+                        new_axons.append(axons_for_retry[i])
+        
+        if len(new_idx) <= 50:  # Only retry if more than 50 miners failed
+            bt.logging.info(f"Only {len(new_idx)} miners failed (≤50 threshold). Giving them default responses instead of retrying.")
+            # Give default responses to failed miners
+            for i in new_idx:
+                res[i] = create_default_response()
+            break
+        
+        idx = new_idx
+        axons_for_retry = new_axons
+        await asyncio.sleep(5 * (attempt + 1))
+    
+    # Fill any remaining None
+    for i, r in enumerate(res):
+        if r is None:
+            res[i] = create_default_response()
+    
+    return res
+
+
+async def forward(self):
+    """
+    Validator forward pass — one full validation round.
+
+    Steps:
+    1.  Select random miners.
+    2.  Fetch the per-round face-variation base from the MIID API.
+    3.  Build ImageRequest with three images (face-variation base + today's
+        IOTD + tomorrow's IOTD) and 5 synthetic variations: indoor bg,
+        outdoor bg, 3 combined edits; plus real screen-replay instructions
+        — that task is a physical capture miners may submit as
+        many non-duplicate times as they want (no daily cap), each one
+        bundling a face close-up + environment shot of the same capture,
+        independent of this request/response cycle).
+    4.  Query miners in batches; collect S3 submission references.
+    5.  Compute KAV rewards via get_image_variation_rewards() (calls grading API).
+    6.  Optionally combine with UAV via apply_reputation_rewards().
+    7.  Update scores and set weights.
+    8.  Upload results to the MIID server.
+    """
+
+    # --- Wandb run setup ---
+    wandb_disabled = (
+        hasattr(self.config, 'wandb')
+        and hasattr(self.config.wandb, 'disable')
+        and self.config.wandb.disable
+    )
+    if not wandb_disabled:
+        bt.logging.info("Creating new wandb run for this validation round")
+        self.new_wandb_run()
+    # --- END WANDB SETUP ---
+
+    request_start = time.time()
+
+    # Ensure today's + tomorrow's IOTD are cached (empty dir on cold start, or new UTC day).
+    # Only needed when the validator itself is sending the seed images — see
+    # VALIDATOR_SENDS_SEED_IMAGE in MIID/validator/fixed_images.py.
+    if VALIDATOR_SENDS_SEED_IMAGE:
+        ensure_daily_fixed_image(self.wallet)
+
+    is_testnet = (
+        self.config.netuid == 322
+        and hasattr(self.config, 'subtensor')
+        and getattr(self.config.subtensor, 'network', None) == "test"
+        and "test.finney.opentensor.ai" in getattr(self.config.subtensor, 'chain_endpoint', '')
+    )
+    
+    bt.logging.info("Updating and querying available uids")
+
+    # 1) Get random UIDs to query
+    available_axon_size = len(self.metagraph.axons) - 1  # Exclude self
+    miner_selection_size = min(available_axon_size, self.config.neuron.sample_size)
+    miner_uids = get_random_uids(self, k=miner_selection_size)
+
+    bt.logging.debug(f"⚙️ Miner selection size: {miner_selection_size}")
+    bt.logging.debug(f"📋 Available axon size: {available_axon_size}")
+
+    miner_uids = miner_uids.tolist()
+    bt.logging.info(f"Selected {len(miner_uids)} miners to query: {miner_uids}")
+
+    request_timeout = self.config.neuron.timeout
+    bt.logging.info(f"Using request timeout of {request_timeout} seconds")
+
+    # 3) Build ImageRequest
+    image_request = None
+    challenge_id = None
+    selected_variations = None  # Track what variations were requested
+    real_screen_replay_instructions = None
+    seed_pool: List[str] = []
+
+    if PHASE4_ENABLED:
+        try:
+            # API is expected to return a single image.
+            image_result = fetch_image_from_api(self.wallet)
+            if image_result is None:
+                bt.logging.warning("Phase 4 disabled: Could not fetch base image from API")
+            else:
+                image_filename, base64_image = image_result
+
+                # Always request (5 synthetic variations):
+                # 1–2) background_in (indoor) + background_out (outdoor)
+                # 3–5) combined edits: lighting+expression, lighting+pose, pose+expression
+                # screen_replay is NOT included here — it's a real physical
+                # capture, not FLUX-generated.
+                selected_variations = build_standard_challenge_variations()
+
+                # Three images sent to miners:
+                #   1. base_image — per-round face for FLUX synthetics (from /image)
+                #   2. daily_seed_image — today's IOTD (from /fixed_image)
+                #   3. tomorrow_seed_image — tomorrow's IOTD (same endpoint, sent early)
+                #
+                # Sandbox fallback (VALIDATOR_SENDS_SEED_IMAGE=False): the validator
+                # does NOT fetch/send IOTDs — miners pick one themselves from the
+                # static fixed_image/ pool. Flip VALIDATOR_SENDS_SEED_IMAGE in
+                # MIID/validator/fixed_images.py to restore that practice mode.
+                daily_seed_filename, daily_seed_b64, daily_seed_date = None, None, None
+                tomorrow_seed_filename, tomorrow_seed_b64, tomorrow_seed_date = None, None, None
+                seed_pool: List[str] = []
+                if VALIDATOR_SENDS_SEED_IMAGE:
+                    today_seed, tomorrow_seed = load_seed_pair_base64()
+                    if today_seed is None:
+                        bt.logging.warning(
+                            "Phase 4: No today's IOTD available; "
+                            "screen-replay instructions will be sent without a seed image."
+                        )
+                    else:
+                        daily_seed_filename, daily_seed_b64, daily_seed_date = today_seed
+                    if tomorrow_seed is None:
+                        bt.logging.warning(
+                            "Phase 4: No tomorrow's IOTD available; "
+                            "miners will only receive today's seed."
+                        )
+                    else:
+                        tomorrow_seed_filename, tomorrow_seed_b64, tomorrow_seed_date = tomorrow_seed
+                    real_screen_replay_instructions = format_real_screen_replay_instructions(
+                        seed_filename=daily_seed_filename,
+                        tomorrow_seed_filename=tomorrow_seed_filename,
+                        seed_date=daily_seed_date,
+                        tomorrow_seed_date=tomorrow_seed_date,
+                    )
+                else:
+                    seed_pool = list_fixed_image_pool()
+                    if not seed_pool:
+                        bt.logging.warning(
+                            "Phase 4: fixed_image/ pool is empty; screen-replay "
+                            "instructions will be sent without a seed pool."
+                        )
+                    real_screen_replay_instructions = format_real_screen_replay_instructions(
+                        seed_pool=seed_pool
+                    )
+
+                # Drand unlock at T+40 min (batch1 20m + batch2 20m); grading window T+40–60m
+                reveal_delay = calculate_reveal_buffer(
+                    getattr(self.config.neuron, "reveal_delay_seconds", REVEAL_DELAY_SECONDS)
+                )
+                target_round, reveal_timestamp = calculate_target_round(reveal_delay)
+                bt.logging.info(
+                    f"Phase 4: drand reveal in {reveal_delay}s ({reveal_delay / 60:.0f} min)"
+                )
+
+                # Generate unique challenge ID
+                challenge_id = f"challenge_{int(time.time())}_{self.wallet.hotkey.ss58_address[:8]}"
+
+                # Convert to VariationRequest objects
+                variation_requests = [
+                    VariationRequest(
+                        type=v["type"],
+                        intensity=v["intensity"],
+                        description=v["description"],
+                        detail=f"{v['detail']}. {IMAGE_VARIATION_REQUIREMENTS}",
+                    )
+                    for v in selected_variations
+                ]
+
+                # Create image request
+                image_request = ImageRequest(
+                    base_image=base64_image,
+                    image_filename=image_filename,
+                    variation_requests=variation_requests,
+                    target_drand_round=target_round,
+                    reveal_timestamp=reveal_timestamp,
+                    challenge_id=challenge_id,
+                    daily_seed_image=daily_seed_b64,
+                    daily_seed_filename=daily_seed_filename,
+                    daily_seed_date=daily_seed_date,
+                    tomorrow_seed_image=tomorrow_seed_b64,
+                    tomorrow_seed_filename=tomorrow_seed_filename,
+                    tomorrow_seed_date=tomorrow_seed_date,
+                    real_screen_replay_instructions=real_screen_replay_instructions,
+                )
+
+                # Log what was selected
+                variation_summary = ", ".join(
+                    f"{v['type']}({v['intensity']})" for v in selected_variations
+                )
+                if VALIDATOR_SENDS_SEED_IMAGE:
+                    seed_mode_log = (
+                        f"today_iotd={daily_seed_filename or 'unavailable'}"
+                        f"({daily_seed_date or '?'}) "
+                        f"tomorrow_iotd={tomorrow_seed_filename or 'unavailable'}"
+                        f"({tomorrow_seed_date or '?'})"
+                    )
+                else:
+                    seed_mode_log = f"seed_pool_size={len(seed_pool)} (miner picks; sandbox mode)"
+                bt.logging.info(
+                    f"Phase 4: three-image request - "
+                    f"face='{image_filename}', "
+                    f"variations=[{variation_summary}], "
+                    f"{seed_mode_log}, "
+                    f"Total requested: {len(selected_variations)}, "
+                    f"drand round {target_round}"
+                )
+
+        except Exception as e:
+            bt.logging.warning(f"Phase 4: Could not create image request: {e}")
+            import traceback
+            bt.logging.debug(f"Phase 4 error traceback: {traceback.format_exc()}")
+            image_request = None
+            selected_variations = None
+
+    # 4) Prepare synapse
+    request_synapse = IdentitySynapse(
+        timeout=request_timeout,
+        image_request=image_request,
+    )
+    bt.logging.info(f"Querying {len(miner_uids)} miners with image variation request")
+    await asyncio.sleep(3)
+
+    # 5) Query miners in batches
+    start_time = time.time()
+    uid_response_map: Dict[int, IdentitySynapse] = {}
+    batch_size = self.config.neuron.batch_size
+    total_batches = (len(miner_uids) + batch_size - 1) // batch_size
+    
+    for i in range(0, len(miner_uids), batch_size):
+        batch_uids = miner_uids[i:i+batch_size]
+        batch_axons = [self.metagraph.axons[uid] for uid in batch_uids]
+        
+        bt.logging.debug(f"🔄 Batch uids: {batch_uids}")
+        await asyncio.sleep(3)  # Large sleep; adjust as desired
+
+        bt.logging.info(f"Processing batch {i//batch_size + 1}/{total_batches} with {len(batch_uids)} miners")
+        batch_start_time = time.time()
+        
+        batch_responses = await dendrite_with_retries(
+            dendrite=self.dendrite,
+            axons=batch_axons,
+            synapse=request_synapse,
+            deserialize=False,
+            timeout=request_timeout,
+            cnt_attempts=3,
+        )
+        
+        batch_duration = time.time() - batch_start_time
+        bt.logging.info(f"Batch {i//batch_size + 1} completed in {batch_duration:.1f}s")
+
+        # Map each response to its corresponding UID
+        for idx_resp, response in enumerate(batch_responses):
+            uid = batch_uids[idx_resp]
+            uid_response_map[uid] = response
+
+            if not hasattr(response, 's3_submissions'):
+                bt.logging.warning(f"Miner {uid}: response missing 's3_submissions'.")
+            elif response.s3_submissions is None:
+                bt.logging.warning(f"Miner {uid}: s3_submissions is None.")
+            elif not response.s3_submissions:
+                bt.logging.warning(f"Miner {uid}: returned empty s3_submissions.")
+            else:
+                bt.logging.info(f"Miner {uid}: returned {len(response.s3_submissions)} S3 submissions.")
+
+        if i + batch_size < len(miner_uids):
+            sleep_time = 2
+            bt.logging.info(f"Sleeping for {sleep_time}s before next batch")
+            await asyncio.sleep(sleep_time)
+    
+    end_time = time.time()
+    bt.logging.info(f"Query completed in {end_time - start_time:.2f} seconds")
+
+    all_responses = [uid_response_map[uid] for uid in miner_uids]
+
+    # Log valid vs invalid responses
+    valid_count = sum(
+        1 for r in all_responses
+        if hasattr(r, 's3_submissions') and r.s3_submissions
+    )
+    bt.logging.info(f"Received {valid_count} valid responses out of {len(all_responses)}")
+
+    # Build s3_submissions_by_miner for grading. Screen-replay submissions are
+    # passed through as-is for now (miners may send as many non-duplicate
+    # captures as they want; actual dedup checking isn't implemented yet —
+    # see note near the top of this file).
+    s3_submissions_by_miner: Dict[str, Any] = {}
+
+    for uid, response in uid_response_map.items():
+        if PHASE4_ENABLED and hasattr(response, 's3_submissions') and response.s3_submissions:
+            miner_hotkey = str(self.metagraph.axons[uid].hotkey)
+            s3_data = []
+            for sub in response.s3_submissions:
+                # screen_replay_uav (date/camera/device/cue-checklist) arrives
+                # already parsed on sub — the miner sent it directly over the
+                # wire, no separate JSON file or S3 upload involved. We don't
+                # use it for KAV grading; we just carry it through into
+                # results/s3_submissions_by_miner so it ends up in the final
+                # JSON uploaded to the MIID server (Flask app) below.
+                uav_dict = None
+                if sub.screen_replay_uav is not None:
+                    if hasattr(sub.screen_replay_uav, "model_dump"):
+                        uav_dict = sub.screen_replay_uav.model_dump()
+                    elif hasattr(sub.screen_replay_uav, "dict"):
+                        uav_dict = sub.screen_replay_uav.dict()
+                    else:
+                        uav_dict = dict(sub.screen_replay_uav)
+
+                if sub.variation_type == "screen_replay":
+                    # Every screen_replay submission carries 2 media files of
+                    # the same capture — face close-up photo/video (primary) +
+                    # environment still (*_angle2), with capture_variant in UAV.
+                    # Miners may send as many non-duplicate captures as they
+                    # want; there's no daily cap.
+                    bt.logging.info(
+                        f"Miner UID {uid} screen_replay received "
+                        f"(face_hash={sub.image_hash[:12]}…, "
+                        f"env_hash={(sub.image_hash_angle2 or 'MISSING')[:12]}…, "
+                        f"variant={(uav_dict or {}).get('capture_variant', '?')}, "
+                        f"uav={'present' if uav_dict else 'MISSING'})"
+                    )
+
+                s3_data.append({
+                    "s3_key":       sub.s3_key,
+                    "image_hash":   sub.image_hash,
+                    "signature":    sub.signature,
+                    "variation_type": sub.variation_type,
+                    "path_signature": sub.path_signature,
+                    "s3_key_angle2":     sub.s3_key_angle2,
+                    "image_hash_angle2": sub.image_hash_angle2,
+                    "signature_angle2":  sub.signature_angle2,
+                    "screen_replay_uav": uav_dict,
+                })
+            s3_submissions_by_miner[str(uid)] = {
+                "hotkey":           miner_hotkey,
+                "submissions":      s3_data,
+                "submission_count": len(s3_data),
+            }
+
+    # Screen-replay summary for the results JSON (same idea as the old
+    # Phase-3 `uav_data` block). Always present, even when nobody uploaded.
+    screen_replay_requested = bool(real_screen_replay_instructions)
+    screen_replay_data = _collect_screen_replay_data(
+        requested=screen_replay_requested,
+        instructions=real_screen_replay_instructions,
+        image_request=image_request,
+        seed_pool=seed_pool,
+        miner_uids=miner_uids,
+        s3_submissions_by_miner=s3_submissions_by_miner,
+    )
+    sr_summary = screen_replay_data["summary"]
+    today_iotd = screen_replay_data["image_of_the_day"]["today"]
+    bt.logging.info(
+        f"Screen-replay: requested={screen_replay_requested}, "
+        f"today_iotd={today_iotd.get('filename') or 'unavailable'}"
+        f"({today_iotd.get('date') or '?'}), "
+        f"miners_uploaded={sr_summary['total_miners_with_screen_replay']}/"
+        f"{screen_replay_data['miners_queried']} queried, "
+        f"submissions={sr_summary['total_screen_replays_collected']}"
+    )
+
+    # Build phase4_image_data for the grading API — mirrors the structure used
+    # in validator_api_test.py so the signing and payload format match exactly.
+    phase4_image_data: Optional[Dict] = None
+    if PHASE4_ENABLED and image_request is not None and selected_variations:
+        phase4_image_data = {
+            "cycle": "Phase4-C5-Execution",
+            "challenge_id": challenge_id,
+            "base_image_filename": image_request.image_filename,
+            "daily_seed_filename": image_request.daily_seed_filename,
+            "daily_seed_date": image_request.daily_seed_date,
+            "tomorrow_seed_filename": image_request.tomorrow_seed_filename,
+            "tomorrow_seed_date": image_request.tomorrow_seed_date,
+            "target_drand_round": image_request.target_drand_round,
+            "reveal_timestamp": image_request.reveal_timestamp,
+            "requested_variations": selected_variations,
+            "variation_count": len(selected_variations),
+            "variation_types": [v["type"] for v in selected_variations],
+            "variation_intensities": [v["intensity"] for v in selected_variations],
+            "s3_submissions_by_miner": s3_submissions_by_miner,
+        }
+
+    # Wait for drand reveal before grading — images stay encrypted until T+40 min
+    if PHASE4_ENABLED and image_request is not None and s3_submissions_by_miner:
+        reveal_ready = wait_until_reveal(
+            target_round=image_request.target_drand_round,
+            reveal_timestamp=image_request.reveal_timestamp,
+        )
+        if not reveal_ready:
+            bt.logging.warning(
+                "Drand round not confirmed; grading API may fail to decrypt submissions"
+            )
+
+    # 6) Compute rewards (KAV + optional UAV)
+    uav_grading_enabled = getattr(self.config.neuron, 'UAV_grading', False)
+
+    if uav_grading_enabled:
+        # Get KAV rewards WITHOUT burn — burn applied after KAV+UAV in apply_reputation_rewards()
+        kav_rewards, kav_uids, detailed_metrics = get_image_variation_rewards(
+            self,
+            challenge_id=challenge_id or "",
+            s3_submissions_by_miner=s3_submissions_by_miner,
+            miner_uids=miner_uids,
+            selected_variations=selected_variations or [],
+            skip_burn=True,
+            phase4_image_data=phase4_image_data,
+        )
+
+        global _cached_rep_data, _cached_rep_version, _pending_allocations, _pending_file_path
+
+        # Initialize pending file path (once per validator session)
+        if _pending_file_path is None:
+            _pending_file_path = (
+                Path(self.config.logging.logging_dir)
+                / "validator_results"
+                / "pending_allocations.json"
+            )
+            _pending_allocations = _load_pending_allocations(_pending_file_path)
+            if _pending_allocations:
+                bt.logging.info(f"Loaded {len(_pending_allocations)} pending allocations from disk")
+
+        # With skip_burn=True, kav_rewards/kav_uids contain only miners (no burn UID)
+        # Convert to list for apply_reputation_rewards
+        miner_uids_list = kav_uids.tolist() if hasattr(kav_uids, 'tolist') else list(kav_uids)
+
+        # Get config values (Phase 4 - Cycle 1)
+        burn_fraction = getattr(self.config.neuron, 'burn_fraction', 0.30)
+        kav_weight = getattr(self.config.neuron, 'kav_weight', 0.10)
+        uav_weight = getattr(self.config.neuron, 'uav_weight', 0.90)
+
+        # Apply reputation weighting (UAV + combine + burn in one call)
+        # Burn is applied ONCE here after KAV + UAV are combined
+        rewards, updated_uids, combined_metrics = apply_reputation_rewards(
+            kav_rewards=kav_rewards,  # Raw KAV quality scores (no burn applied yet)
+            uids=miner_uids_list,
+            rep_data=_cached_rep_data,  # From previous forward pass (may be empty on first run)
+            metagraph=self.metagraph,
+            burn_fraction=burn_fraction,
+            kav_weight=kav_weight,
+            uav_weight=uav_weight,
+            kav_metrics=detailed_metrics,
+        )
+
+        bt.logging.info(
+            f"Applied reputation rewards: {len(combined_metrics)} metric entries "
+            f"(queried KAV sample={len(miner_uids_list)}), "
+            f"using rep_snapshot_version={_cached_rep_version or 'None (first run)'}"
+        )
+    else:
+        # UAV grading disabled: Use KAV-only scoring with burn applied directly
+        bt.logging.info("UAV_grading disabled. Using KAV-only scoring with burn applied.")
+        rewards, updated_uids, detailed_metrics = get_image_variation_rewards(
+            self,
+            challenge_id=challenge_id or "",
+            s3_submissions_by_miner=s3_submissions_by_miner,
+            miner_uids=miner_uids,
+            selected_variations=selected_variations or [],
+            skip_burn=False,
+            phase4_image_data=phase4_image_data,
+        )
+        combined_metrics = detailed_metrics
+
+    # Verify UID-reward mapping before updating scores
+    queried_uid_set = set(int(u) for u in miner_uids)
+    bt.logging.info("=== UID-REWARD MAPPING VERIFICATION ===")
+    for i, uid in enumerate(updated_uids):
+        reward = rewards[i] if i < len(rewards) else 0.0
+        if uid == 59:
+            bt.logging.info(f"UID {uid}: IS BURNED EVENT. NO REWARD OR RESPONSE.")
+        else:
+            has_response = uid_response_map.get(int(uid)) is not None
+            was_queried = int(uid) in queried_uid_set
+            bt.logging.info(
+                f"UID {uid}: Reward={reward:.4f}, HasResponse={has_response}, "
+                f"WasQueried={was_queried}"
+            )
+    bt.logging.info("=== END UID-REWARD MAPPING VERIFICATION ===")
+
+    self.update_scores(rewards, updated_uids)
+    bt.logging.info(f"REWARDS: {rewards}  for UIDs: {updated_uids}")
+
+    # 7) Save results locally (testnet: flat file only; mainnet: run_* subdir)
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    results_dir = os.path.join(self.config.logging.logging_dir, "validator_results")
+    os.makedirs(results_dir, exist_ok=True)
+
+    if is_testnet:
+        json_path = os.path.join(results_dir, f"results_{timestamp}.json")
+        run_dir = None
+    else:
+        run_dir = os.path.join(results_dir, f"run_{timestamp}")
+        os.makedirs(run_dir, exist_ok=True)
+        json_path = os.path.join(run_dir, f"results_{timestamp}.json")
+
+    results = {
+        "timestamp": timestamp,
+        "phase4_image_data": {
+            **(phase4_image_data or {}),
+            "note": "Phase 4 Cycle 5 Execution: image variations with S3 uploads for YANEZ execution scoring",
+            "enabled": PHASE4_ENABLED and image_request is not None,
+            "s3_bucket": "yanez-miid-sn54",
+            # Fallbacks for when image_request was unavailable (phase4_image_data is None)
+            "challenge_id": challenge_id,
+            "base_image_filename": image_request.image_filename if image_request else None,
+            "target_drand_round":  image_request.target_drand_round if image_request else None,
+            "reveal_timestamp":    image_request.reveal_timestamp if image_request else None,
+            "requested_variations": selected_variations or [],
+            "variation_count":  len(selected_variations) if selected_variations else 0,
+            "variation_types":  [v["type"] for v in selected_variations] if selected_variations else [],
+            "variation_intensities": [v["intensity"] for v in selected_variations] if selected_variations else [],
+            "s3_submissions_by_miner": s3_submissions_by_miner,
+            "screen_replay_requested": screen_replay_requested,
+        },
+        # Same role as the old Phase-3 `uav_data` block: what we asked, the
+        # image of the day, and who actually uploaded a screen-replay.
+        "screen_replay_data": screen_replay_data,
+        "responses": {},
+        "rewards": {},
+    }
+
+    # rewards/updated_uids are aligned and may include unqueried miners (UAV-only)
+    # plus burn/partner UIDs. Do not index rewards by miner_uids position.
+    reward_by_uid = {
+        int(updated_uids[i]): float(rewards[i])
+        for i in range(len(updated_uids))
+    }
+    queried_uid_set = set(int(u) for u in miner_uids)
+
+    for i, uid in enumerate(miner_uids):
+        # Get the response for this specific UID from our mapping
+        response = uid_response_map.get(uid)
+        axon = self.metagraph.axons[uid]
+        axon_data = {
+            "ip":         str(axon.ip)       if hasattr(axon, 'ip')         else None,
+            "port":       int(axon.port)     if hasattr(axon, 'port')       else None,
+            "hotkey":     str(axon.hotkey),
+            "coldkey":    str(axon.coldkey)  if hasattr(axon, 'coldkey')    else None,
+            "version":    int(axon.version)  if hasattr(axon, 'version')    else None,
+            "protocol":   int(axon.protocol) if hasattr(axon, 'protocol')   else None,
+            "is_serving": bool(axon.is_serving) if hasattr(axon, 'is_serving') else None,
+        }
+        response_data = {
+            "uid":            int(uid),
+            "hotkey":         str(self.metagraph.axons[uid].hotkey),
+            "was_queried":    True,
+            "axon":           axon_data,
+            "response_time":  response.process_time if response else None,
+            "s3_submissions": s3_submissions_by_miner.get(str(uid), {}),
+            "scoring_details": detailed_metrics[i] if i < len(detailed_metrics) else {},
+        }
+        if response is None:
+            response_data["error"] = {"message": "No response received"}
+        elif not (hasattr(response, 's3_submissions') and response.s3_submissions):
+            if hasattr(response, 'dendrite') and hasattr(response.dendrite, 'status_code'):
+                response_data["error"] = {
+                    "status_code":    response.dendrite.status_code,
+                    "status_message": getattr(response.dendrite, 'status_message', 'Unknown error'),
+                }
+            else:
+                response_data["error"] = {"message": "Empty or invalid response"}
+
+        results["responses"][str(uid)] = response_data
+        results["rewards"][str(uid)] = reward_by_uid.get(int(uid), 0.0)
+
+    # Record UAV-only rewards for miners that were not sampled this round
+    # (and burn/partner UIDs) so the upload JSON matches set_weights.
+    for uid_int, reward_val in reward_by_uid.items():
+        uid_str = str(uid_int)
+        if uid_str in results["rewards"]:
+            continue
+        results["rewards"][uid_str] = reward_val
+        if uid_int in queried_uid_set:
+            continue
+        if uid_int >= len(self.metagraph.axons):
+            continue
+        axon = self.metagraph.axons[uid_int]
+        results["responses"][uid_str] = {
+            "uid": int(uid_int),
+            "hotkey": str(axon.hotkey),
+            "was_queried": False,
+            "note": (
+                "Not sampled for this round's KAV challenge; "
+                "received UAV-only reward from reputation snapshot."
+            ),
+            "s3_submissions": {},
+            "scoring_details": {},
+        } 
+    # logging the spec_version before setting weights
+    bt.logging.info(f"Spec version for setting weights: {self.spec_version}")
+    (success, uint_uids, uint_weights) = self.set_weights()
+    bt.logging.info(f"Weights set successfully: {success}")
+
+    results["Weights"] = {
+        "spec_version":   self.spec_version,
+        "hotkey":         str(self.wallet.hotkey.ss58_address),
+        "timestamp":      timestamp,
+        "dendrite_timeout": request_timeout,
+        "Did_it_set_weights": success,
+        "uids":    [int(uid)    for uid    in uint_uids]    if uint_uids    else [],
+        "weights": [int(weight) for weight in uint_weights] if uint_weights else [],
+    }
+
+    results["metagraph_scores"] = {
+        "timestamp":     timestamp,
+        "total_miners":  len(self.scores),
+        "scores_by_uid": {
+            str(uid): {
+                "uid":        int(uid),
+                "hotkey":     str(self.metagraph.axons[uid].hotkey) if uid < len(self.metagraph.axons) else "unknown",
+                "score":      float(self.scores[uid]),
+                "was_queried": uid in miner_uids,
+            }
+            for uid in range(len(self.scores))
+        },
+    }
+
+    # Reward allocation tracking
+    if uav_grading_enabled:
+        # Create new allocation for this forward pass
+        new_allocation = {
+            "timestamp":            timestamp,
+            "rep_snapshot_version": _cached_rep_version,
+            "miners":               combined_metrics,
+        }
+
+        # Add to pending allocations and save to disk (mainnet only)
+        _pending_allocations.append(new_allocation)
+        if not is_testnet:
+            _save_pending_allocations(_pending_file_path, _pending_allocations)
+
+        # Build reward_allocation with ALL pending allocations (for retry on previous failures)
+        results["reward_allocation"] = {
+            "rep_snapshot_version": _cached_rep_version,
+            "cycle_id":             f"cycle_{timestamp}",
+            "pending_count":        len(_pending_allocations),
+            "allocations":          _pending_allocations,
+        }
+        bt.logging.info(f"Added reward_allocation: {len(_pending_allocations)} pending allocation(s)")
+    else:
+        # UAV grading disabled: No reward allocation tracking
+        results["reward_allocation"] = {
+            "enabled": False,
+            "note":    "UAV_grading disabled — using KAV-only scoring",
+        }
+
+    # Save the query and responses to a JSON file (now including weights and reward_allocation)
+    with open(json_path, 'w', encoding='utf-8') as f:
+        json.dump(results, f, indent=4)
+    
+    bt.logging.info(f"Saved validator results to: {json_path}")
+    
+    # Prepare extra data for wandb logging
+    wandb_extra_data = {
+        "variation_count":  len(selected_variations) if selected_variations else 0,
+        "dendrite_timeout": request_timeout,
+        "screen_replay_requested": screen_replay_requested,
+        "screen_replay_miners_uploaded": sr_summary["total_miners_with_screen_replay"],
+        "screen_replay_submissions": sr_summary["total_screen_replays_collected"],
+        "daily_seed_filename": today_iotd.get("filename"),
+        "daily_seed_date": today_iotd.get("date"),
+    }
+
+    # Upload to MIID server
+    hotkey             = self.wallet.hotkey
+    message_to_sign    = f"Hotkey: {hotkey} \n timestamp: {timestamp}"
+    signed_contents    = sign_message(self.wallet, message_to_sign, output_file=None)
+    results["signature"] = signed_contents
+
+    upload_success = False
+    upload_response = None
+    # If for some reason uploading the data fails, we should just log it and continue.
+    # Server might go down but should not be a unique point of failure for the subnet
+    try:
+        if is_testnet:
+            bt.logging.info("Testnet detected — skipping upload to MIID server")
+            upload_success = True
+        else:
+            bt.logging.info(f"Uploading data to: {MIID_SERVER}")
+            for attempt in range(UPLOAD_RETRY_ATTEMPTS):
+                upload_response = upload_data(MIID_SERVER, hotkey, results)
+                if upload_response is not None:
+                    upload_success = True
+                    break
+                if attempt < UPLOAD_RETRY_ATTEMPTS - 1:
+                    bt.logging.warning(
+                        f"Upload attempt {attempt + 1}/{UPLOAD_RETRY_ATTEMPTS} failed. "
+                        f"Retrying in {UPLOAD_RETRY_DELAY_SECONDS}s..."
+                    )
+                    await asyncio.sleep(UPLOAD_RETRY_DELAY_SECONDS)
+
+        if upload_success:
+            bt.logging.info(
+                "Testnet: upload skipped (treated as successful)"
+                if is_testnet else "Data uploaded successfully to external server"
+            )
+
+            # ==========================================================================
+            # Cache rep_data from response for NEXT forward pass (Phase 4 - Cycle 5 Execution)
+            # ==========================================================================
+            if uav_grading_enabled:
+                if upload_response and upload_response.get("rep_cache"):
+                    _cached_rep_version = upload_response.get("rep_snapshot_version")
+                    _cached_rep_data    = upload_response.get("rep_cache", {})
+                    bt.logging.info(
+                        f"Updated rep cache: version={_cached_rep_version}, "
+                        f"miners={len(_cached_rep_data)}"
+                    )
+
+                # Clear pending allocations after successful upload (mainnet only)
+                _pending_allocations.clear()
+                if not is_testnet:
+                    _clear_pending_allocations(_pending_file_path)
+                bt.logging.info("Cleared pending allocations after successful upload")
+            # ==========================================================================
+        else:
+            bt.logging.error("Failed to upload data to external server")
+            if uav_grading_enabled:
+                bt.logging.warning(
+                    f"Upload failed. {len(_pending_allocations)} allocation(s) pending for retry"
+                )
+    except Exception as e:
+        bt.logging.error(f"Uploading data failed: {str(e)}")
+        upload_success = False
+    
+    wandb_extra_data["upload_success"] = upload_success
+
+    # Call log_step from the Validator instance AFTER the upload attempt
+    log_uids = (
+        updated_uids.tolist() if hasattr(updated_uids, "tolist") else list(updated_uids)
+    )
+    self.log_step(
+        uids=log_uids,
+        metrics=combined_metrics if uav_grading_enabled else detailed_metrics,
+        rewards=rewards,
+        extra_data=wandb_extra_data
+    )
+    
+    # Delete JSON file and directories ONLY after successful upload (keep on testnet for review)
+    if upload_success and not is_testnet:
+        bt.logging.info(f"Upload successful. Cleaning up local files...")
+        bt.logging.info(f"Deleting json file: {json_path}")
+        bt.logging.info(f"Deleting rundir: {run_dir}")
+        bt.logging.info(f"Deleting validator_results dir: {results_dir}")
+        try:
+            os.remove(json_path)
+            os.rmdir(run_dir)
+            os.rmdir(results_dir)
+            bt.logging.info("Successfully cleaned up all local files")
+        except Exception as e:
+            bt.logging.error(f"Error deleting files: {e}")
+            bt.logging.warning(f"You might want to delete these files manually: {json_path}, {run_dir}, {results_dir}")
+    elif is_testnet:
+        try:
+            for name in os.listdir(results_dir):
+                path = os.path.join(results_dir, name)
+                if os.path.abspath(path) == os.path.abspath(json_path):
+                    continue
+                if os.path.isdir(path):
+                    shutil.rmtree(path)
+                else:
+                    os.remove(path)
+            bt.logging.info(f"Testnet: kept results file at: {json_path}")
+        except Exception as e:
+            bt.logging.error(f"Testnet cleanup failed: {e}")
+            bt.logging.info(f"Testnet results file at: {json_path}")
+    else:
+        bt.logging.warning("Upload failed. Keeping local files for debugging.")
+        bt.logging.warning("You might want to reach out to the MIID team to add your hotkey to the allowlist.")
+        bt.logging.info(f"JSON file preserved at: {json_path}")
+        bt.logging.info(f"Run directory preserved at: {run_dir}")
+    
+    # --- FINISH WANDB RUN AFTER EACH FORWARD PASS ---
+    # Finish the wandb run after weights are set and logged (unless wandb is disabled)
+    if self.wandb_run and not wandb_disabled:
+        bt.logging.info("Finishing wandb run after completing validation cycle")
+        try:
+            self.wandb_run.finish()
+            # Clean up all wandb run folders after finishing
+            self.cleanup_all_wandb_runs()
+        except Exception as e:
+            bt.logging.error(f"Error finishing wandb run: {e}")
+        finally:
+            self.wandb_run = None
+    # --- END WANDB FINISH ---
+    
+    # 10) Set weights and enforce min epoch time
+    
+    request_end = time.time()
+    if request_end - request_start < EPOCH_MIN_TIME:
+        sleep_secs = EPOCH_MIN_TIME - (request_end - request_start)
+        bt.logging.info(f"Finished quickly; sleeping for {sleep_secs:.1f}s")
+        await asyncio.sleep(sleep_secs)
+
+    bt.logging.info("Forward pass complete.")
+    await asyncio.sleep(5)
+
+    return True

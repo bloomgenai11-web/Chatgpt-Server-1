@@ -31,6 +31,130 @@ async function sedotNative(urlTarget, destPath, context) {
 }
 
 // =====================================================================
+// 📸 STEP SHOT (dari Script 2)
+// =====================================================================
+async function stepShot(page, folderHasil, label) {
+    try {
+        if (!folderHasil) return;
+        const safe = String(label || 'step').replace(/[^a-zA-Z0-9_-]+/g, '_').slice(0, 60);
+        const fp = path.join(folderHasil, `step_${Date.now()}_${safe}.png`);
+        await page.screenshot({ path: fp, fullPage: false }).catch(() => {});
+        console.log(`[CHATGPT] 📸 ${label} → ${path.basename(fp)}`);
+    } catch (_) {}
+}
+
+// =====================================================================
+// 👤 TUNGGU PROFIL SIAP (dari Script 2)
+// =====================================================================
+async function tungguProfilSiap(page, timeoutMs = 45000) {
+    console.log('[CHATGPT] 👤 Menunggu profil sidebar siap...');
+    const t0 = Date.now();
+    let ok = false;
+    let lastLog = 0;
+
+    while (Date.now() - t0 < timeoutMs) {
+        const info = await page.evaluate(() => {
+            const btn = document.querySelector('[data-testid="accounts-profile-button"]');
+            const img = btn && (
+                btn.querySelector('img[alt="Profile image"]') ||
+                btn.querySelector('img[src*="auth0.com/avatars"]') ||
+                btn.querySelector('img[src^="http"]')
+            );
+            const src = img ? (img.getAttribute('src') || img.currentSrc || '') : '';
+            const aria = btn ? (btn.getAttribute('aria-label') || '') : '';
+
+            let sidebarName = '';
+            const upgradeBtn = Array.from(document.querySelectorAll('button, a, span')).find((el) =>
+                /^(Upgrade|Tingkatkan)$/i.test((el.textContent || '').trim())
+            );
+            if (upgradeBtn) {
+                let root = upgradeBtn.closest('div');
+                for (let i = 0; i < 6 && root; i++) {
+                    const t = (root.innerText || '').replace(/\s+/g, ' ').trim();
+                    if (/\b(Free|Plus|Pro|Team|Bebas)\b/i.test(t) && t.length < 80) {
+                        sidebarName = t;
+                        break;
+                    }
+                    root = root.parentElement;
+                }
+            }
+
+            const ariaHasName =
+                aria &&
+                !/^(open profile menu|buka menu profil)$/i.test(aria.trim()) &&
+                aria.trim().length > 5;
+
+            return {
+                hasBtn: !!btn,
+                hasImg: !!(src && src.startsWith('http')),
+                src: src.slice(0, 90),
+                aria: aria.slice(0, 80),
+                sidebarName: sidebarName.slice(0, 80),
+                ariaHasName,
+            };
+        });
+
+        if (info.hasImg) {
+            ok = true;
+            console.log(`[CHATGPT] ✅ Profil via foto ${Date.now() - t0}ms`);
+            break;
+        }
+        if (info.ariaHasName) {
+            ok = true;
+            console.log(`[CHATGPT] ✅ Profil via aria ${Date.now() - t0}ms`);
+            break;
+        }
+        if (info.sidebarName && /\b(Free|Plus|Pro|Team|Bebas)\b/i.test(info.sidebarName)) {
+            const cleaned = info.sidebarName
+                .replace(/\b(Free|Plus|Pro|Team|Bebas|Upgrade|Tingkatkan)\b/gi, '')
+                .replace(/\s+/g, ' ')
+                .trim();
+            if (cleaned.length >= 2) {
+                ok = true;
+                console.log(`[CHATGPT] ✅ Profil via sidebar ${Date.now() - t0}ms`);
+                break;
+            }
+        }
+
+        if (Date.now() - lastLog > 2500) {
+            lastLog = Date.now();
+            console.log(`[CHATGPT] profil… ${Date.now() - t0}ms`);
+        }
+        await page.waitForTimeout(300);
+    }
+
+    if (!ok) {
+        console.log(`[CHATGPT] ❌ Timeout profil ${timeoutMs}ms — hentikan`);
+        throw new Error('PROFIL_TIMEOUT: Profil sidebar tidak terdeteksi dalam ' + timeoutMs + 'ms. Cookie/sesi mungkin invalid.');
+    }
+}
+
+// =====================================================================
+// ⏳ TUNGGU COMPOSER SIAP (dari Script 2)
+// =====================================================================
+async function tungguComposerSiap(page, timeoutMs = 60000) {
+    console.log('[CHATGPT] ⏳ Menunggu kolom teks (composer) siap...');
+    await page.waitForFunction(() => {
+        const a = document.querySelector('#prompt-textarea');
+        if (a) {
+            const st = window.getComputedStyle(a);
+            if (st && st.display !== 'none' && st.visibility !== 'hidden') return true;
+        }
+        const b = document.querySelector('[data-testid="prompt-textarea"]');
+        if (b) return true;
+        const c = document.querySelector('div.ProseMirror[contenteditable="true"], [contenteditable="true"].ProseMirror');
+        if (c) return true;
+        const send = document.querySelector('[data-testid="send-button"]');
+        if (send) {
+            const form = send.closest('form') || send.closest('div');
+            if (form && form.querySelector('[contenteditable="true"]')) return true;
+        }
+        return false;
+    }, { timeout: timeoutMs });
+    console.log('[CHATGPT] ✅ Composer siap');
+}
+
+// =====================================================================
 // 🚀 EKSEKUTOR UTAMA CHATGPT (HIBRIDA MURNI)
 // =====================================================================
 async function eksekusiChatGPT(tipeTugas, promptTeks, isThinkingMode, fileInputData, folderHasil, context) {
@@ -41,34 +165,78 @@ async function eksekusiChatGPT(tipeTugas, promptTeks, isThinkingMode, fileInputD
     const page = await context.newPage();
     await page.setViewportSize({ width: 1920, height: 1080 });
 
-    // 🌟 SISTEM PEMBUNUH POP-UP OTONOM
+    // 🌟 SISTEM PEMBUNUH POP-UP OTONOM (selalu nyala, termasuk memory NUX)
     await page.addInitScript(() => {
-        const observer = new MutationObserver(() => {
+        const dismissPopups = () => {
             const btns = document.querySelectorAll('button');
-            for (let btn of btns) {
+            for (const btn of btns) {
                 const txt = (btn.textContent || '').trim().toLowerCase();
-                if (txt === 'got it' || txt === '知道了' || txt === 'okay' || txt === 'ok' || txt === 'stay logged out' || txt === 'continue') {
-                    try { btn.click(); } catch(e) {}
+                if (
+                    txt === 'got it' ||
+                    txt === '知道了' ||
+                    txt === 'okay' ||
+                    txt === 'ok' ||
+                    txt === 'stay logged out' ||
+                    txt === 'continue'
+                ) {
+                    try { btn.click(); } catch (e) {}
                 }
-                if (btn.querySelector('svg') && (btn.getAttribute('aria-label') === 'Close' || btn.getAttribute('aria-label') === 'Tutup')) {
-                    try { btn.click(); } catch(e) {}
+                if (
+                    btn.querySelector('svg') &&
+                    (btn.getAttribute('aria-label') === 'Close' || btn.getAttribute('aria-label') === 'Tutup')
+                ) {
+                    try { btn.click(); } catch (e) {}
                 }
             }
-            const dialogs = document.querySelectorAll('[role="dialog"]');
-            dialogs.forEach(d => {
-                if(d.innerText.includes('More relevant') || d.innerText.includes('个性化') || d.innerText.includes('already uploaded')) d.remove();
+
+            // Dialog radix / memory NUX: "More relevant, personalized replies"
+            document.querySelectorAll('[role="dialog"]').forEach((d) => {
+                const t = d.innerText || '';
+                if (
+                    t.includes('More relevant') ||
+                    t.includes('personalized replies') ||
+                    t.includes('个性化') ||
+                    t.includes('already uploaded')
+                ) {
+                    const gotIt = Array.from(d.querySelectorAll('button')).find((b) =>
+                        /^\s*got it\s*$/i.test((b.textContent || '').trim())
+                    );
+                    if (gotIt) {
+                        try { gotIt.click(); } catch (e) {}
+                    } else {
+                        try { d.remove(); } catch (e) {}
+                    }
+                }
             });
-        });
-        observer.observe(document, { childList: true, subtree: true });
+        };
+
+        const observer = new MutationObserver(() => dismissPopups());
+        observer.observe(document.documentElement, { childList: true, subtree: true });
+        setInterval(dismissPopups, 800);
+        dismissPopups();
     });
 
     try {
+        // ---------------------------------------------------------
+        // 1) Navigasi
+        // ---------------------------------------------------------
         console.log(`\n[CHATGPT] 🌐 Membuka ChatGPT...`);
         await page.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded', timeout: 90000 }).catch(()=>{});
+        await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+        await stepShot(page, folderHasil, '01_after_goto');
 
-        console.log('[CHATGPT] ⏳ Menunggu antarmuka pengetikan siap...');
-        await page.waitForSelector('#prompt-textarea', { state: 'visible', timeout: 60000 });
-        await page.waitForTimeout(1500);
+        // ---------------------------------------------------------
+        // 2) Tunggu profil (dari Local)
+        // ---------------------------------------------------------
+        await tungguProfilSiap(page, 45000);
+        await stepShot(page, folderHasil, '02_after_profile');
+
+        // ---------------------------------------------------------
+        // 3) Tunggu composer (dari Local)
+        // ---------------------------------------------------------
+        await tungguComposerSiap(page, 60000);
+        await stepShot(page, folderHasil, '03_composer_ready');
+        await page.waitForTimeout(800);
 
         if (isThinkingMode) {
             console.log(`[CHATGPT] 🧠 Mengaktifkan Thinking Mode...`);
@@ -235,17 +403,60 @@ async function eksekusiChatGPT(tipeTugas, promptTeks, isThinkingMode, fileInputD
                 } catch (e) { console.log(`[CHATGPT] ❌ Error Gambar: ${e.message}`); }
             }
 
+            // Pantau lampiran (dari Script 2)
             console.log(`[CHATGPT] ⏳ Menunggu visualisasi file di layar...`);
-            await page.waitForFunction((expected) => {
-                const composer = document.querySelector('#prompt-textarea')?.closest('div');
-                if (composer) {
-                    const attach = composer.querySelectorAll('button[aria-label*="Remove" i], div[data-testid*="attachment"], img[alt*="attachment"]');
-                    if (attach.length >= expected) return true;
-                }
-                return false;
-            }, validFiles.length, { timeout: 45000 }).catch(() => {});
+            try {
+                await page.waitForFunction((expected) => {
+                    const body = (document.body.innerText || '').toLowerCase();
+                    if (body.includes('uploading')) return false;
+
+                    const removeBtns = document.querySelectorAll(
+                        'button[aria-label*="Remove" i], button[aria-label*="Hapus" i], button[aria-label*="remove file" i]'
+                    );
+                    if (removeBtns.length >= expected) return true;
+
+                    const thumbs = document.querySelectorAll(
+                        'img[src*="blob:"], img[alt*="attachment" i], div[data-testid*="file-thumbnail" i], div[class*="file-thumbnail"]'
+                    );
+                    if (thumbs.length >= expected) return true;
+
+                    const composer =
+                        document.querySelector('#prompt-textarea')?.closest('form') ||
+                        document.querySelector('[data-testid="send-button"]')?.closest('form');
+                    if (composer) {
+                        const chips = composer.querySelectorAll('[data-testid*="file"], [class*="attachment"], [class*="thumbnail"]');
+                        if (chips.length >= expected) return true;
+                    }
+                    return false;
+                }, validFiles.length, { timeout: 45000 });
+                console.log('[CHATGPT] ✅ Lampiran terdeteksi');
+                await stepShot(page, folderHasil, '04_attachment_ok');
+            } catch (e) {
+                console.log('[CHATGPT] ⚠️ Timeout pantau lampiran:', e.message);
+                await stepShot(page, folderHasil, '04_attachment_timeout');
+            }
+
+            // Stabilitas upload
+            try {
+                await page.waitForFunction(() => {
+                    const nodes = Array.from(document.querySelectorAll('div, span, p'));
+                    for (const n of nodes) {
+                        const t = (n.textContent || '').trim();
+                        if (/^Uploading(\.\.\.|…)?$/i.test(t)) return false;
+                        if (/^Uploading file/i.test(t) && !/Try using connectors/i.test(t)) return false;
+                    }
+                    if (document.querySelector('[data-testid*="upload-progress"]')) return false;
+                    const sendBtn = document.querySelector('[data-testid="send-button"]');
+                    if (!sendBtn) return false;
+                    return !(sendBtn.disabled || sendBtn.hasAttribute('disabled') || sendBtn.getAttribute('aria-disabled') === 'true');
+                }, { timeout: 120000 });
+                console.log('[CHATGPT] ✅ Upload stabil');
+            } catch (e) {
+                console.log('[CHATGPT] ⚠️ Timeout stabilitas upload');
+            }
+            await page.waitForTimeout(1000);
         }
-        // =================================================================
+
 
         const { jumlahBubbleAwal, jumlahGambarAwal } = await page.evaluate(() => {
             const genImages = Array.from(document.querySelectorAll('img[src*="backend-api/estuary"]')).filter(img => {
@@ -281,6 +492,7 @@ async function eksekusiChatGPT(tipeTugas, promptTeks, isThinkingMode, fileInputD
             const sendBtn = document.querySelector('[data-testid="send-button"]'); 
             if (sendBtn) sendBtn.click(); 
         });
+        await stepShot(page, folderHasil, '08_after_send');
 
         console.log('\n[CHATGPT] ⏳ Mulai radar pemantauan DOM...');
         let hasilEktraksi = null;
