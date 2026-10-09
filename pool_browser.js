@@ -36,36 +36,45 @@ async function stepShot(page, folderHasil, label) {
 
 async function installPopupKiller(page) {
   await page.addInitScript(() => {
+    const isDismissLabel = (raw) => {
+      const t = (raw || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      return (
+        t === 'got it' ||
+        t === 'mengerti' ||
+        t === 'saya mengerti' ||
+        t === 'baik' ||
+        t === 'okay' ||
+        t === 'ok' ||
+        t === 'continue' ||
+        t === 'lanjutkan' ||
+        t === 'stay logged out' ||
+        t === '知道了'
+      );
+    };
     const dismissPopups = () => {
-      const btns = document.querySelectorAll('button');
-      for (const btn of btns) {
-        const txt = (btn.textContent || '').trim().toLowerCase();
-        if (
-          txt === 'got it' ||
-          txt === '知道了' ||
-          txt === 'okay' ||
-          txt === 'ok' ||
-          txt === 'stay logged out' ||
-          txt === 'continue'
-        ) {
+      // 1) Semua tombol teks
+      document.querySelectorAll('button, [role="button"], a').forEach((btn) => {
+        if (isDismissLabel(btn.textContent || btn.innerText)) {
           try { btn.click(); } catch (e) {}
         }
-      }
-      document.querySelectorAll('[role="dialog"]').forEach((d) => {
+      });
+      // 2) Dialog radix / memory NUX (EN + ID)
+      document.querySelectorAll('[role="dialog"], [data-state="open"]').forEach((d) => {
         const t = d.innerText || '';
         if (
-          t.includes('More relevant') ||
-          t.includes('personalized replies') ||
-          t.includes('个性化') ||
-          t.includes('already uploaded')
+          /more relevant|personalized replies|个性化|already uploaded|memori|memory/i.test(t)
         ) {
-          const gotIt = Array.from(d.querySelectorAll('button')).find((b) =>
-            /^\s*got it\s*$/i.test((b.textContent || '').trim())
+          const btn = Array.from(d.querySelectorAll('button, [role="button"]')).find((b) =>
+            isDismissLabel(b.textContent || b.innerText)
           );
-          if (gotIt) {
-            try { gotIt.click(); } catch (e) {}
+          if (btn) {
+            try { btn.click(); } catch (e) {}
           } else {
-            try { d.remove(); } catch (e) {}
+            // primary button di dialog (biasanya Got it)
+            const primary = d.querySelector('button.btn-primary, button[class*="btn-primary"]');
+            if (primary) {
+              try { primary.click(); } catch (e) {}
+            }
           }
         }
       });
@@ -74,7 +83,7 @@ async function installPopupKiller(page) {
       window.__poolPopupKillerInstalled = true;
       const observer = new MutationObserver(() => dismissPopups());
       observer.observe(document.documentElement, { childList: true, subtree: true });
-      setInterval(dismissPopups, 800);
+      setInterval(dismissPopups, 600);
     }
     dismissPopups();
   });
@@ -87,29 +96,54 @@ function startKeepAlivePopupGuard(slot) {
     if (slot.state !== 'ready' || !slot.page) return;
     try {
       if (typeof slot.page.isClosed === 'function' && slot.page.isClosed()) return;
-      const clicked = await slot.page.evaluate(() => {
-        let n = 0;
-        document.querySelectorAll('button').forEach((b) => {
-          const t = (b.textContent || '').trim().toLowerCase();
-          if (t === 'got it' || t === 'okay' || t === 'ok' || t === 'continue' || t === 'stay logged out') {
-            try { b.click(); n++; } catch (e) {}
+      // Playwright locator dulu (lebih andal daripada DOM click murni)
+      let n = 0;
+      try {
+        const loc = slot.page.locator(
+          'button:has-text("Got it"), button:has-text("Mengerti"), button:has-text("Okay"), button:has-text("OK"), [role="dialog"] button.btn-primary'
+        );
+        const count = await loc.count();
+        for (let i = 0; i < count; i++) {
+          const btn = loc.nth(i);
+          if (await btn.isVisible().catch(() => false)) {
+            await btn.click({ timeout: 1500 }).catch(() => {});
+            n++;
+          }
+        }
+      } catch (_) {}
+
+      // Fallback evaluate
+      const n2 = await slot.page.evaluate(() => {
+        const isDismissLabel = (raw) => {
+          const t = (raw || '').replace(/\s+/g, ' ').trim().toLowerCase();
+          return (
+            t === 'got it' || t === 'mengerti' || t === 'saya mengerti' ||
+            t === 'baik' || t === 'okay' || t === 'ok' ||
+            t === 'continue' || t === 'lanjutkan' || t === 'stay logged out' || t === '知道了'
+          );
+        };
+        let c = 0;
+        document.querySelectorAll('button, [role="button"]').forEach((b) => {
+          if (isDismissLabel(b.textContent || b.innerText)) {
+            try { b.click(); c++; } catch (e) {}
           }
         });
-        document.querySelectorAll('[role="dialog"]').forEach((d) => {
+        document.querySelectorAll('[role="dialog"], [data-state="open"]').forEach((d) => {
           const text = d.innerText || '';
-          if (text.includes('More relevant') || text.includes('personalized replies') || text.includes('个性化')) {
-            const gotIt = Array.from(d.querySelectorAll('button')).find((b) =>
-              /^\s*got it\s*$/i.test((b.textContent || '').trim())
-            );
-            if (gotIt) {
-              try { gotIt.click(); n++; } catch (e) {}
+          if (/more relevant|personalized replies|memori|memory|个性化/i.test(text)) {
+            const gotIt = Array.from(d.querySelectorAll('button')).find((b) => isDismissLabel(b.textContent));
+            const primary = gotIt || d.querySelector('button.btn-primary, button[class*="btn-primary"]');
+            if (primary) {
+              try { primary.click(); c++; } catch (e) {}
             }
           }
         });
-        return n;
-      });
-      if (clicked > 0) {
-        console.log(`[POOL] slot#${slot.id} keep-alive: klik popup x${clicked}`);
+        return c;
+      }).catch(() => 0);
+      n += n2;
+
+      if (n > 0) {
+        console.log(`[POOL] slot#${slot.id} keep-alive: klik popup x${n}`);
       }
     } catch (_) {
       // page navigasi / transient — abaikan
@@ -468,6 +502,18 @@ async function runTaskOnSlot(slot, { action, prompt, isThinkingMode, translatedF
         jumlahGambarAwal: genImages.length,
       };
     });
+
+    // Popup bisa muncul setelah profil READY — bersihkan lagi sebelum suntik
+    try {
+      const loc = page.locator(
+        'button:has-text("Got it"), button:has-text("Mengerti"), button:has-text("Okay"), [role="dialog"] button.btn-primary'
+      );
+      const count = await loc.count();
+      for (let i = 0; i < Math.min(count, 5); i++) {
+        const b = loc.nth(i);
+        if (await b.isVisible().catch(() => false)) await b.click({ timeout: 1500 }).catch(() => {});
+      }
+    } catch (_) {}
 
     console.log(`[POOL] ⚡ Menyuntikkan Prompt...`);
     const textarea = page.locator('#prompt-textarea');
