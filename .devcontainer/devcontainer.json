@@ -1,24 +1,26 @@
 {
-  "name": "work-ekosistem-bot-gateway",
+  "name": "ekosistem-yanez-unified",
   "image": "mcr.microsoft.com/devcontainers/javascript-node:22-bookworm",
   "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
   "remoteUser": "node",
   "hostRequirements": {
     "cpus": 4,
-    "memory": "16gb"
+    "memory": "16gb",
+    "storage": "32gb"
   },
   "containerEnv": {
     "CAMOUFOX_INSTALL_DIR": "/home/node/.cache/camoufox",
     "HEADLESS": "true",
-    "DEBIAN_FRONTEND": "noninteractive"
+    "DEBIAN_FRONTEND": "noninteractive",
+    "PYTHONUNBUFFERED": "1"
   },
   "onCreateCommand": "bash -lc 'git config --global --add safe.directory \"*\" || true'",
   "updateContentCommand": "bash -lc 'git config --global --add safe.directory \"*\" || true'",
   "postCreateCommand": "bash .devcontainer/setup.sh",
-  "postStartCommand": "bash .devcontainer/start-bot.sh",
+  "postStartCommand": "bash .devcontainer/start-all.sh",
   "customizations": {
     "vscode": {
-      "extensions": ["dbaeumer.vscode-eslint"],
+      "extensions": ["dbaeumer.vscode-eslint", "ms-python.python"],
       "settings": {
         "terminal.integrated.defaultProfile.linux": "bash",
         "security.workspace.trust.enabled": false,
