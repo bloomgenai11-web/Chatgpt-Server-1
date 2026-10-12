@@ -19,7 +19,7 @@ const BOT_PROXY_TYPE = (process.env.BOT_PROXY_TYPE || 'http').toLowerCase(); // 
 const BOT_PROXY_VERSION = parseInt(process.env.BOT_PROXY_VERSION || '5', 10);
 
 const REDIS_QUEUE_KEY = process.env.REDIS_QUEUE_KEY || 'atomicmail:accounts';
-const MAX_PAT_STOCK = parseInt(process.env.MAX_PAT_STOCK || '4', 10);
+const MAX_PAT_STOCK = parseInt(process.env.MAX_PAT_STOCK || '2', 10);
 const SHIFTS_PER_PAT = parseInt(process.env.SHIFTS_PER_PAT || '24', 10);
 const GATE_POLL_MS = 30000;
 const IDLE_TIMEOUT_MINUTES = 240;
