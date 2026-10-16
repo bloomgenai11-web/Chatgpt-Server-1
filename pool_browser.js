@@ -369,7 +369,9 @@ async function bootSlotOnce(slot, folderHasil) {
   const context = await browser.newContext({ acceptDownloads: true });
   await context.addCookies(sesi.cookies);
   const page = await context.newPage();
-  await page.setViewportSize({ width: 1920, height: 1080 });
+  // setViewportSize HANG di Camoufox headless+Xvfb Codespace — jangan panggil.
+  // Ukuran dari launchGatewayBrowser (width/height).
+  // await page.setViewportSize({ width: 1920, height: 1080 });
   await installPopupKiller(page);
 
   try {
