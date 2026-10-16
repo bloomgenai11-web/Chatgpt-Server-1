@@ -20,7 +20,7 @@ resolve_root() {
   if [[ -z "$root" ]]; then
     local here
     here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-    if [[ -f "$here/bot_github.js"  ]]; then root="$here"; fi
+    if [[ -f "$here/bot_github.js" ]]; then root="$here"; fi
   fi
   # 3) scan /workspaces/* (skip .codespaces)
   if [[ -z "$root" || "$root" == *".codespaces"* ]]; then
@@ -28,7 +28,7 @@ resolve_root() {
     for d in /workspaces/*; do
       [[ -d "$d" ]] || continue
       case "$d" in */.codespaces) continue ;; esac
-      if [[ -f "$d/bot_github.js"  ]]; then found="$d"; break; fi
+      if [[ -f "$d/bot_github.js" ]]; then found="$d"; break; fi
     done
     if [[ -n "$found" ]]; then root="$found"; fi
   fi

@@ -1,12 +1,11 @@
 {
-  "name": "ekosistem-codespace",
+  "name": "work-ekosistem-bot-gateway",
   "image": "mcr.microsoft.com/devcontainers/javascript-node:22-bookworm",
   "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
   "remoteUser": "node",
   "hostRequirements": {
     "cpus": 4,
-    "memory": "8gb",
-    "storage": "32gb"
+    "memory": "16gb"
   },
   "containerEnv": {
     "CAMOUFOX_INSTALL_DIR": "/home/node/.cache/camoufox",
