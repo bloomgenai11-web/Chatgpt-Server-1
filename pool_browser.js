@@ -12,7 +12,7 @@ const SESI_TIMEOUT_MS = parseInt(process.env.POOL_SESI_TIMEOUT_MS || '15000', 10
 const PROFIL_TIMEOUT_MS = parseInt(process.env.POOL_PROFIL_TIMEOUT_MS || String(SESI_TIMEOUT_MS), 10);
 const REBUILD_DELAY_MS = parseInt(process.env.POOL_REBUILD_DELAY_MS || '5000', 10);
 const BOOT_GAP_MS = parseInt(process.env.POOL_BOOT_GAP_MS || '4000', 10);
-const READY_REFRESH_MS = parseInt(process.env.POOL_READY_REFRESH_MS || String(30 * 1000), 10);
+const READY_REFRESH_MS = parseInt(process.env.POOL_READY_REFRESH_MS || String(5 * 30 * 1000), 10);
 
 let deps = {
   launchGatewayBrowser: null,
