@@ -71,9 +71,7 @@ app.use('/files', express.static(folderHasil));
 // Launch: opsi proxy Playwright (selaras bot_github.js), bukan camoufox_safe.
 // =====================================================================
 function initialProxyMode() {
-    if (PROXY_HOST && PROXY_PORT) return 'primary';
     if (BD_PROXY_HOST && BD_PROXY_PORT) return 'brightdata';
-    if (STATIC_PROXY_HOST && STATIC_PROXY_PORT) return 'static';
     return 'none';
 }
 let proxyMode = initialProxyMode();
@@ -95,17 +93,21 @@ function setMode(mode, ip, logLine) {
 }
 
 function monitorProxy() {
-    if (PROXY_HOST && PROXY_PORT) {
-        const primaryUrl = `socks5h://${PROXY_HOST}:${PROXY_PORT}`;
-        return curlViaProxy(primaryUrl, (ip) => {
-            if (ip) {
-                setMode('primary', ip, `\n[NETWORK] ✅ L1 localtonet ON (IP: ${ip}).`);
-                return;
-            }
-            tryBrightDataFallback();
-        });
+    if (!BD_PROXY_HOST || !BD_PROXY_PORT) {
+        setMode('none', null, `\n[NETWORK] Bright Data tidak ada → internet Codespace (tanpa proxy).`);
+        return;
     }
-    tryBrightDataFallback();
+    const auth = BD_PROXY_USER
+        ? `${encodeURIComponent(BD_PROXY_USER)}:${encodeURIComponent(BD_PROXY_PASS)}@`
+        : '';
+    const bdUrl = `http://${auth}${BD_PROXY_HOST}:${BD_PROXY_PORT}`;
+    curlViaProxy(bdUrl, (ip) => {
+        if (ip) {
+            setMode('brightdata', ip, `\n[NETWORK] ✅ Bright Data ON (IP: ${ip}).`);
+            return;
+        }
+        setMode('none', null, `\n[NETWORK] ⚠️ Bright Data bermasalah → internet Codespace (tanpa proxy).`);
+    });
 }
 
 function tryBrightDataFallback() {
@@ -169,24 +171,8 @@ async function launchGatewayBrowser() {
         firefoxUserPrefs: prefs,
     };
 
-    // localtonet SOCKS di Camoufox = "Unable to find the proxy server" (lihat screenshot).
-    // Browser ChatGPT: Bright Data HTTP → STATIC → direct. Radar L1 tetap curl.
-    const useLocaltonetBrowser = process.env.GATEWAY_USE_LOCALTONET === 'true';
-
-    if (useLocaltonetBrowser && PROXY_HOST && PROXY_PORT) {
-        Object.assign(prefs, {
-            'network.proxy.type': 1,
-            'network.proxy.socks': PROXY_HOST,
-            'network.proxy.socks_port': PROXY_PORT,
-            'network.proxy.socks_version': PROXY_VERSION || 5,
-            'network.proxy.socks_remote_dns': true,
-            'network.dns.disableIPv6': true,
-        });
-        camoufoxOpts.geoip = true;
-        camoufoxOpts.firefoxUserPrefs = prefs;
-        label = 'Proxy';
-        gunakanProxy = true;
-    } else if (BD_PROXY_HOST && BD_PROXY_PORT) {
+    // ChatGPT hanya 2 jalur: Bright Data, atau internet Codespace jika BD bermasalah.
+    if (proxyMode === 'brightdata' && BD_PROXY_HOST && BD_PROXY_PORT) {
         camoufoxOpts.geoip = true;
         camoufoxOpts.proxy = {
             server: `http://${BD_PROXY_HOST}:${BD_PROXY_PORT}`,
@@ -195,20 +181,11 @@ async function launchGatewayBrowser() {
         if (BD_PROXY_PASS) camoufoxOpts.proxy.password = BD_PROXY_PASS;
         label = 'BrightData';
         gunakanProxy = true;
-    } else if (STATIC_PROXY_HOST && STATIC_PROXY_PORT) {
-        camoufoxOpts.geoip = true;
-        camoufoxOpts.proxy = {
-            server: `http://${STATIC_PROXY_HOST}:${STATIC_PROXY_PORT}`,
-        };
-        if (STATIC_PROXY_USER) camoufoxOpts.proxy.username = STATIC_PROXY_USER;
-        if (STATIC_PROXY_PASS) camoufoxOpts.proxy.password = STATIC_PROXY_PASS;
-        label = 'Static';
-        gunakanProxy = true;
     } else {
         prefs['network.proxy.type'] = 0;
         camoufoxOpts.geoip = false;
         camoufoxOpts.firefoxUserPrefs = prefs;
-        label = 'Local';
+        label = 'Codespace';
         gunakanProxy = false;
     }
 
@@ -274,26 +251,36 @@ app.post('/api/generate', async (req, res) => {
     try {
         const activeUrl = await redis.get('active_gateway_url') || `http://localhost:${PORT}`;
 
-        // Pool opsional: hanya jika modul ada + slot ready
+        // Slot pool = PAT sehat yang sudah ditutup. Jalur tugas tetap launch biasa.
+        let poolSlot = null;
         if (poolBrowser && typeof poolBrowser.acquireReadySlot === 'function') {
-            const slot = poolBrowser.acquireReadySlot();
-            if (slot) {
-                console.log(`[GATEWAY] ⚡ Pool slot#${slot.id} cookie=${slot.cookieId}`);
-                try {
-                    const { hasil, cookieId } = await poolBrowser.runTaskOnSlot(slot, {
-                        action, prompt, isThinkingMode, translatedFiles, folderHasil,
-                    });
-                    res.json({
-                        status: 'success',
-                        worker: cookieId,
-                        network: 'pool',
-                        text: hasil.text,
-                        fileUrls: (hasil.files || []).map(f => `${activeUrl}/files/${f}`),
-                    });
-                    return;
-                } catch (poolErr) {
-                    console.error(`[GATEWAY] ⚠️ Pool gagal, cold start: ${poolErr.message}`);
-                }
+            poolSlot = poolBrowser.acquireReadySlot();
+        }
+        if (poolSlot && poolSlot.cookies) {
+            try {
+                const sesi = { id: poolSlot.cookieId, cookies: poolSlot.cookies };
+                console.log(`[GATEWAY] ⚡ Pool slot#${poolSlot.id} cookie=${sesi.id} | net=${proxyMode}`);
+                const launched = await launchGatewayBrowser();
+                browser = launched.browser;
+                context = await browser.newContext({ acceptDownloads: true });
+                await context.addCookies(sesi.cookies);
+                const hasil = await chatgptModule.eksekusiChatGPT(action, prompt, isThinkingMode, translatedFiles, folderHasil, context);
+                res.json({
+                    status: 'success',
+                    worker: sesi.id,
+                    network: launched.label,
+                    text: hasil.text,
+                    fileUrls: (hasil.files || []).map(f => `${activeUrl}/files/${f}`),
+                });
+                return;
+            } catch (poolErr) {
+                console.error(`[GATEWAY] ⚠️ Pool gagal, cold start: ${poolErr.message}`);
+                if (context) await context.close().catch(() => {});
+                if (browser) await browser.close().catch(() => {});
+                context = null;
+                browser = null;
+            } finally {
+                if (typeof poolBrowser.releaseSlot === 'function') poolBrowser.releaseSlot(poolSlot);
             }
         }
 
