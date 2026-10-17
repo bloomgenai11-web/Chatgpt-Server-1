@@ -1,18 +1,18 @@
 /**
  * pool_browser.js
- * - Boot slot: langkah sama seperti chatgpt.js (goto â†’ stepShot â†’ profil â†’ composer) lalu HOLD page
- * - Saat tugas: JANGAN goto ulang. Pakai page yang sudah READY â†’ suntik prompt / mode / upload â†’ radar
+ * - Boot slot: cek PAT sehat, simpan cookie ke slot, tutup browser.
+ * - Tanpa mode ready dan tanpa refresh. Tugas memakai cookie itu lewat gateway.
  */
 const path = require('path');
 const fs = require('fs');
 
-const POOL_SIZE = parseInt(process.env.POOL_SIZE || '5', 10);
+const POOL_SIZE = parseInt(process.env.POOL_SIZE || '10', 10);
 // Timeout cek sesi (login/signup vs composer) â€” 15 detik, lalu cookie berikutnya
 const SESI_TIMEOUT_MS = parseInt(process.env.POOL_SESI_TIMEOUT_MS || '15000', 10);
 const PROFIL_TIMEOUT_MS = parseInt(process.env.POOL_PROFIL_TIMEOUT_MS || String(SESI_TIMEOUT_MS), 10);
 const REBUILD_DELAY_MS = parseInt(process.env.POOL_REBUILD_DELAY_MS || '5000', 10);
 const BOOT_GAP_MS = parseInt(process.env.POOL_BOOT_GAP_MS || '4000', 10);
-const READY_REFRESH_MS = parseInt(process.env.POOL_READY_REFRESH_MS || String(5 * 30 * 1000), 10);
+let poolFolder = null;
 
 let deps = {
   launchGatewayBrowser: null,
@@ -83,21 +83,8 @@ async function installPopupKiller(page) {
   });
 }
 
-/** Node-side: klik area kosong saat pending. Refresh halaman hanya tiap 5 menit, hanya saat READY. */
-function startKeepAlivePopupGuard(slot) {
-  stopKeepAlivePopupGuard(slot);
-  const tick = async () => {
-    if (slot.state !== 'ready' || slot.refreshing || !slot.page) return;
-    try {
-      if (typeof slot.page.isClosed === 'function' && slot.page.isClosed()) return;
-      await klikAreaKosong(slot.page);
-    } catch (_) {}
-  };
-  slot._keepAliveTimer = setInterval(tick, 8000);
-  slot._refreshTimer = setInterval(() => {
-    refreshReadySlot(slot).catch((e) => console.log(`[POOL] slot#${slot.id} refresh error: ${e.message}`));
-  }, READY_REFRESH_MS);
-}
+/** Ready + refresh 5 menit dimatikan. Slot hanya menyimpan PAT, browser sudah ditutup. */
+function startKeepAlivePopupGuard(_slot) {}
 function stopKeepAlivePopupGuard(slot) {
   if (slot && slot._keepAliveTimer) {
     clearInterval(slot._keepAliveTimer);
@@ -109,27 +96,8 @@ function stopKeepAlivePopupGuard(slot) {
   }
 }
 
-async function refreshReadySlot(slot) {
-  if (!slot || slot.state !== 'ready' || slot.refreshing || !slot.page) return;
-  slot.refreshing = true;
-  console.log(`[POOL] slot#${slot.id} refresh 5 menit (ready, bukan saat tugas)`);
-  try {
-    await slot.page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
-    await slot.page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
-    await klikAreaKosong(slot.page);
-    await tungguSesiValid(slot.page, SESI_TIMEOUT_MS);
-    await tungguComposerSiap(slot.page, 20000);
-    console.log(`[POOL] slot#${slot.id} refresh selesai, tetap READY`);
-  } catch (e) {
-    console.log(`[POOL] slot#${slot.id} refresh gagal (${e.message}) â€” cookie lain`);
-    slot.refreshing = false;
-    slot.state = 'dead';
-    destroySlot(slot)
-      .then(() => bootSlotLoop(slot, null))
-      .catch((err) => console.error(`[POOL] rebuild setelah refresh:`, err.message));
-    return;
-  }
-  slot.refreshing = false;
+async function refreshReadySlot(_slot) {
+  return;
 }
 
 async function deteksiLoginAtauSignup(page) {
@@ -395,14 +363,17 @@ async function bootSlotOnce(slot, folderHasil) {
     throw e;
   }
 
-  slot.browser = browser;
-  slot.context = context;
-  slot.page = page; // HOLD â€” jangan ditutup
   slot.cookieId = sesi.id;
+  slot.cookies = sesi.cookies;
   slot.readyAt = Date.now();
+  slot.page = null;
+  slot.context = null;
+  slot.browser = null;
   slot.state = 'ready';
-  startKeepAlivePopupGuard(slot);
-  console.log(`[POOL] slot#${slot.id} READY cookie=${sesi.id} net=${launched.label} (page held, popup guard on)`);
+  try { await page.close().catch(() => {}); } catch (_) {}
+  try { await context.close().catch(() => {}); } catch (_) {}
+  try { await browser.close().catch(() => {}); } catch (_) {}
+  console.log(`[POOL] slot#${slot.id} PAT sehat disimpan cookie=${sesi.id} net=${launched.label} — browser ditutup`);
 }
 
 async function bootSlotLoop(slot, folderHasil) {
@@ -429,11 +400,23 @@ async function bootAllSequential(folderHasil) {
 }
 
 function acquireReadySlot() {
-  const slot = slots.find((s) => s.state === 'ready' && !s.refreshing && slotPageAlive(s));
+  const slot = slots.find((s) => s.state === 'ready' && s.cookies && s.cookies.length);
   if (!slot) return null;
-  stopKeepAlivePopupGuard(slot);
   slot.state = 'busy';
   return slot;
+}
+
+function releaseSlot(slot) {
+  if (!slot) return;
+  const id = slot.id;
+  slot.state = 'dead';
+  slot.cookies = null;
+  slot.cookieId = null;
+  slot.page = null;
+  slot.context = null;
+  slot.browser = null;
+  console.log(`[POOL] slot#${id} PAT terpakai → isi slot lagi`);
+  bootSlotLoop(slot, poolFolder).catch((e) => console.error(`[POOL] rebuild slot#${id}:`, e.message));
 }
 
 function slotPageAlive(slot) {
@@ -507,7 +490,8 @@ async function startPool(folderHasil) {
     return;
   }
   started = true;
-  console.log(`[POOL] start size=${POOL_SIZE} (sequential, hold page setelah profil)`);
+  poolFolder = folderHasil || null;
+  console.log(`[POOL] start size=${POOL_SIZE} (cek PAT sehat, simpan slot, tutup browser)`);
   for (let i = 0; i < POOL_SIZE; i++) {
     slots.push({
       id: i + 1,
@@ -516,6 +500,7 @@ async function startPool(folderHasil) {
       context: null,
       page: null,
       cookieId: null,
+      cookies: null,
       readyAt: null,
       refreshing: false,
       task: null,
@@ -533,13 +518,14 @@ function poolStats() {
 }
 
 function isPoolReady() {
-  return started && slots.some((s) => s.state === 'ready' && slotPageAlive(s));
+  return started && slots.some((s) => s.state === 'ready' && s.cookies && s.cookies.length);
 }
 
 module.exports = {
   setDeps,
   startPool,
   acquireReadySlot,
+  releaseSlot,
   runTaskOnSlot,
   poolStats,
   isPoolReady,
