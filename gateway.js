@@ -49,7 +49,7 @@ function ghHeaders(pat) {
 
 const SHIFTS_PER_PAT = parseInt(process.env.SHIFTS_PER_PAT || '24', 10);
 
-const MAX_COOKIES = 150;
+const MAX_COOKIES = parseInt(process.env.MAX_COOKIES || '300', 10);
 const PORT = 3001;
 const app = express();
 
@@ -206,7 +206,42 @@ monitorProxy();
 let isRetiring = false;
 let jumlahTugasAktif = 0;
 
-async function dapatkanSesiCookie() {
+/**
+ * Index cookie GLOBAL di Redis: key `global_chatgpt_index` (1..MAX_COOKIES).
+ * Nilai = index cookie TERAKHIR yang sudah di-CONSUME untuk tugas nyata.
+ * Cookie berikutnya untuk tugas = index+1 (wrap ke 1).
+ *
+ * - consumeSesiCookie()     : INCR & ambil (cold start / QC / tugas tanpa pool)
+ * - peekSesiCookie(offset)  : baca calon index+offset TANPA INCR (pool validasi)
+ * - commitSesiIndex(index)  : set index ke N jika N > current (setelah pool pakai cookie N)
+ *
+ * Pool TIDAK boleh INCR saat boot. 10 slot = peek offset 1..10 dari current.
+ * Codespace ganti → index Redis sama → akun yang hanya di-cek pool tidak terlompati.
+ */
+function formatCookiePayload(rawData, cookieKey, index) {
+    return {
+        id: cookieKey,
+        index: index,
+        cookies: Object.entries(rawData).map(([key, value]) => ({
+            name: key, value: String(value), domain: '.chatgpt.com', path: '/', secure: true, sameSite: 'Lax'
+        })),
+    };
+}
+
+async function getCurrentCookieIndex() {
+    const raw = await redis.get('global_chatgpt_index');
+    const n = parseInt(raw, 10);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+function wrapIndex(n) {
+    let x = ((n - 1) % MAX_COOKIES) + 1;
+    if (x < 1) x = 1;
+    return x;
+}
+
+/** Ambil cookie berikutnya dan MAJUKAN global_chatgpt_index. */
+async function consumeSesiCookie() {
     let index = await redis.incr('global_chatgpt_index');
     if (index > MAX_COOKIES) {
         await redis.set('global_chatgpt_index', 1);
@@ -215,12 +250,47 @@ async function dapatkanSesiCookie() {
     const cookieKey = `cookie_chatgpt_${index}`;
     const rawData = await redis.get(cookieKey);
     if (!rawData) throw new Error(`[REDIS] Data tidak ditemukan: ${cookieKey}`);
+    return formatCookiePayload(rawData, cookieKey, index);
+}
 
-    const formattedCookies = Object.entries(rawData).map(([key, value]) => ({
-        name: key, value: String(value), domain: '.chatgpt.com', path: '/', secure: true, sameSite: 'Lax'
-    }));
+/**
+ * Peek calon cookie: offset 1 = next setelah current (default).
+ * offset 2..POOL_SIZE = slot berikutnya, tanpa menyentuh global_chatgpt_index.
+ */
+async function peekSesiCookie(offset = 1) {
+    const off = Math.max(1, parseInt(offset, 10) || 1);
+    const current = await getCurrentCookieIndex();
+    const index = wrapIndex(current + off);
+    const cookieKey = `cookie_chatgpt_${index}`;
+    const rawData = await redis.get(cookieKey);
+    if (!rawData) throw new Error(`[REDIS] Data tidak ditemukan: ${cookieKey}`);
+    return formatCookiePayload(rawData, cookieKey, index);
+}
 
-    return { id: cookieKey, cookies: formattedCookies };
+/**
+ * Setelah pool (atau jalur lain) benar-benar memakai cookie index N untuk tugas,
+ * commit supaya cold-start berikutnya tidak mengulang N.
+ * Hanya maju (tidak mundur) agar tidak menabrak konsumsi paralel.
+ */
+async function commitSesiIndex(index) {
+    const n = parseInt(index, 10);
+    if (!Number.isFinite(n) || n < 1) return;
+    const current = await getCurrentCookieIndex();
+    // Sederhana: set ke N jika N "di depan" current dalam ring, atau current masih 0.
+    // Untuk ring 1..MAX: jika belum pernah consume, set N; jika N > current tanpa wrap, set N;
+    // jika wrap (N < current) biarkan current (konsumen lain sudah lebih maju) kecuali current=0.
+    if (current === 0 || n >= current) {
+        await redis.set('global_chatgpt_index', n);
+        console.log(`[COOKIE] commit index ${current} → ${n}`);
+    } else {
+        // N < current bisa berarti wrap-around leg — jangan mundurkan pointer
+        console.log(`[COOKIE] commit skip (N=${n} < current=${current})`);
+    }
+}
+
+/** Alias jalur tugas / QC = consume. */
+async function dapatkanSesiCookie() {
+    return consumeSesiCookie();
 }
 
 app.post('/api/generate', async (req, res) => {
@@ -258,13 +328,15 @@ app.post('/api/generate', async (req, res) => {
         }
         if (poolSlot && poolSlot.cookies) {
             try {
-                const sesi = { id: poolSlot.cookieId, cookies: poolSlot.cookies };
+                const sesi = { id: poolSlot.cookieId, index: poolSlot.cookieIndex, cookies: poolSlot.cookies };
                 console.log(`[GATEWAY] ⚡ Pool slot#${poolSlot.id} cookie=${sesi.id} | net=${proxyMode}`);
                 const launched = await launchGatewayBrowser();
                 browser = launched.browser;
                 context = await browser.newContext({ acceptDownloads: true });
                 await context.addCookies(sesi.cookies);
                 const hasil = await chatgptModule.eksekusiChatGPT(action, prompt, isThinkingMode, translatedFiles, folderHasil, context);
+                // Cookie pool dipakai tugas nyata → commit index (jangan dilewati di codespace berikutnya)
+                if (sesi.index) await commitSesiIndex(sesi.index);
                 res.json({
                     status: 'success',
                     worker: sesi.id,
@@ -372,7 +444,11 @@ async function jalankanDemoAwal(activeUrl) {
                     poolBrowser.setDeps({
                         launchGatewayBrowser,
                         dapatkanSesiCookie,
+                        peekSesiCookie,
+                        consumeSesiCookie,
+                        commitSesiIndex,
                         chatgptModule,
+                        MAX_COOKIES,
                     });
                     console.log(`[POOL] QC sukses — mengaktifkan pool browser...`);
                     poolBrowser.startPool(folderHasil).catch((e) => console.error('[POOL] start gagal:', e.message));
