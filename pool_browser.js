@@ -1,7 +1,9 @@
 /**
  * pool_browser.js
- * - Boot slot: cek PAT sehat, simpan cookie ke slot, tutup browser.
- * - Tanpa mode ready dan tanpa refresh. Tugas memakai cookie itu lewat gateway.
+ * - Boot slot: PEEK cookie dari global_chatgpt_index (TANPA INCR), validasi sesi, simpan ke slot, tutup browser.
+ * - Index Redis hanya maju saat gateway consumeSesiCookie / tugas nyata — pool tidak melompati akun.
+ * - Satu antrian bersama gateway (cookie_chatgpt_1..MAX_COOKIES).
+ * - Tugas: acquire slot → pakai cookies tersimpan → release → boot slot lagi (peek berikutnya).
  */
 const path = require('path');
 const fs = require('fs');
@@ -16,8 +18,11 @@ let poolFolder = null;
 
 let deps = {
   launchGatewayBrowser: null,
-  dapatkanSesiCookie: null,
+  dapatkanSesiCookie: null,   // consume (maju index) — jangan dipakai di boot pool
+  peekSesiCookie: null,       // peek next cookie TANPA maju index
+  consumeSesiCookie: null,    // sama dengan dapatkanSesiCookie
   chatgptModule: null,
+  MAX_COOKIES: 300,
 };
  
 const slots = [];
@@ -309,6 +314,7 @@ async function destroySlot(slot) {
   slot.context = null;
   slot.browser = null;
   slot.cookieId = null;
+  slot.cookieIndex = null;
   slot.readyAt = null;
   slot.state = 'dead';
   try { if (page) await page.close().catch(() => {}); } catch (_) {}
@@ -321,16 +327,21 @@ async function destroySlot(slot) {
  * folderHasil untuk stepShot (opsional).
  */
 async function bootSlotOnce(slot, folderHasil) {
-  if (!deps.launchGatewayBrowser || !deps.dapatkanSesiCookie) {
-    throw new Error('pool deps belum di-set');
+  // Pool HANYA peek cookie (tidak INCR global_chatgpt_index).
+  // Index maju hanya saat gateway consume / tugas memakai cookie.
+  const peekFn = deps.peekSesiCookie || deps.dapatkanSesiCookie;
+  if (!deps.launchGatewayBrowser || !peekFn) {
+    throw new Error('pool deps belum di-set (butuh launchGatewayBrowser + peekSesiCookie)');
   }
 
   slot.state = 'booting';
-  console.log(`[POOL] slot#${slot.id} booting (cara gateway)...`);
+  console.log(`[POOL] slot#${slot.id} booting (peek cookie, index tidak maju)...`);
   await destroySlot(slot);
 
-  const sesi = await deps.dapatkanSesiCookie();
-  console.log(`[POOL] slot#${slot.id} cookie=${sesi.id}`);
+  // offset = nomor slot → cookie_chatgpt_(current+slot.id) tanpa INCR
+  const sesi = await peekFn(slot.id);
+  console.log(`[POOL] slot#${slot.id} peek cookie=${sesi.id} idx=${sesi.index} (global index belum di-INCR)`);
+  slot.cookieIndex = sesi.index;
 
   const launched = await deps.launchGatewayBrowser();
   const browser = launched.browser;
@@ -485,13 +496,13 @@ async function startPool(folderHasil) {
     console.log('[POOL] sudah started, skip');
     return;
   }
-  if (!deps.launchGatewayBrowser || !deps.dapatkanSesiCookie) {
-    console.error('[POOL] start ditolak: deps belum di-set');
+  if (!deps.launchGatewayBrowser || !(deps.peekSesiCookie || deps.dapatkanSesiCookie)) {
+    console.error('[POOL] start ditolak: deps belum di-set (launch + peekSesiCookie)');
     return;
   }
   started = true;
   poolFolder = folderHasil || null;
-  console.log(`[POOL] start size=${POOL_SIZE} (cek PAT sehat, simpan slot, tutup browser)`);
+  console.log(`[POOL] start size=${POOL_SIZE} | peek-only cookie (shared global_chatgpt_index, MAX=${deps.MAX_COOKIES || '?'})`);
   for (let i = 0; i < POOL_SIZE; i++) {
     slots.push({
       id: i + 1,
@@ -500,6 +511,7 @@ async function startPool(folderHasil) {
       context: null,
       page: null,
       cookieId: null,
+      cookieIndex: null,
       cookies: null,
       readyAt: null,
       refreshing: false,
