@@ -376,6 +376,31 @@ async function bacaStatusTombolComposer(page) {
     }).catch(() => ({ status: 'unknown', aria: '', testid: '', copyCount: 0, voice: false, stop: false }));
 }
 
+/**
+ * Tunggu composer benar-benar idle: tombol Start Voice / Mulai Suara terlihat.
+ * Dipakai sebelum upload attachment agar UI siap menerima file.
+ */
+async function tungguStartVoice(page, timeoutMs = 45000) {
+    console.log('[CHATGPT] 👁 Menunggu Start Voice / Mulai Suara sebelum upload/aksi...');
+    const t0 = Date.now();
+    let lastLog = 0;
+    while (Date.now() - t0 < timeoutMs) {
+        const st = await bacaStatusTombolComposer(page);
+        if (st.status === 'idle' && st.voice) {
+            console.log(`[CHATGPT] ✅ Start Voice terdeteksi (${Date.now() - t0}ms) aria="${st.aria}"`);
+            return st;
+        }
+        // send_ready juga berarti composer siap input (kadang voice diganti kirim kosong)
+        // Paneer minta khusus Start Voice — jangan anggap send_ready cukup.
+        if (Date.now() - lastLog > 2500) {
+            lastLog = Date.now();
+            console.log(`[CHATGPT] tunggu voice… ${Date.now() - t0}ms status=${st.status} voice=${st.voice} aria="${st.aria}"`);
+        }
+        await page.waitForTimeout(400);
+    }
+    throw new Error('TIMEOUT: Start Voice / Mulai Suara tidak muncul dalam ' + timeoutMs + 'ms');
+}
+
 async function klikSendAtauEnter(page) {
     const sels = [
         'button[type="submit"][aria-label="Kirim"]',
@@ -562,6 +587,10 @@ async function eksekusiChatGPT(tipeTugas, promptTeks, isThinkingMode, fileInputD
             await klikAreaKosong(page);
             await tungguComposerSiap(page, 30000);
         }
+
+        // Semua aksi (thinking / upload / prompt / send) hanya setelah Start Voice
+        await tungguStartVoice(page, 45000);
+        await stepShot(page, folderHasil, '03b_start_voice_ready');
 
         if (isThinkingMode) {
             console.log(`[CHATGPT] ÃƒÂ°Ã…Â¸Ã‚Â§  Mengaktifkan Thinking Mode...`);
