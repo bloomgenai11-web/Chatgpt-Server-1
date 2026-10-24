@@ -3,6 +3,63 @@ const path = require('path');
 const https = require('https');
 const http = require('http');
 
+/** Tag log per cookie / pool agar parallel tasks tidak campur. */
+let _logCtx = { cookieId: '', poolSlot: '' };
+function setChatgptLogCtx({ cookieId, poolSlot } = {}) {
+    _logCtx = {
+        cookieId: cookieId ? String(cookieId) : '',
+        poolSlot: poolSlot != null && poolSlot !== '' ? String(poolSlot) : '',
+    };
+}
+function chatgptTag() {
+    const parts = [];
+    if (_logCtx.cookieId) {
+        const m = String(_logCtx.cookieId).match(/(\d+)\s*$/);
+        parts.push(m ? ('CHATGPT_' + m[1]) : _logCtx.cookieId);
+    }
+    if (_logCtx.poolSlot) parts.push('P' + _logCtx.poolSlot);
+    return parts.length ? '[' + parts.join('|') + '] ' : '';
+}
+
+(function patchChatgptConsole() {
+    if (global.__chatgptLogPatched) return;
+    global.__chatgptLogPatched = true;
+    const _orig = console.log.bind(console);
+    const _err = console.error.bind(console);
+    function stamp(args) {
+        if (!args.length || typeof args[0] !== 'string') return args;
+        if (!args[0].includes('[CHATGPT]')) return args;
+        const tag = chatgptTag().trim();
+        if (!tag) return args;
+        // Hindari double-tag
+        if (args[0].includes(tag)) return args;
+        const out = args.slice();
+        out[0] = out[0].replace('[CHATGPT]', tag.trim());
+        return out;
+    }
+    console.log = (...a) => _orig(...stamp(a));
+    console.error = (...a) => {
+        if (a.length && typeof a[0] === 'string' && a[0].includes('[CHATGPT]')) {
+            return _err(...stamp(a));
+        }
+        return _err(...a);
+    };
+})();
+
+function chatgptLog(...args) {
+    if (args.length && typeof args[0] === 'string') {
+        args[0] = args[0].replace(/\[CHATGPT\]/g, '[CHATGPT] ' + chatgptTag().trimEnd()).replace(/\[CHATGPT\] \[/g, '[CHATGPT] [');
+        // Normalize: [CHATGPT] [cookie] message
+        if (args[0].startsWith('[CHATGPT]') && chatgptTag()) {
+            const tag = chatgptTag().trim();
+            if (!args[0].includes(tag)) {
+                args[0] = args[0].replace('[CHATGPT]', '[CHATGPT] ' + tag);
+            }
+        }
+    }
+    console.log(...args);
+}
+
 // =====================================================================
 // ÃƒÂ°Ã…Â¸Ã¢â‚¬ÂÃ¢â‚¬Ëœ FUNGSI SEDOT NATIVE (Menggunakan Context Playwright)
 // =====================================================================
@@ -483,6 +540,15 @@ async function eksekusiChatGPT(tipeTugas, promptTeks, isThinkingMode, fileInputD
     let arrayFile = Array.isArray(fileInputData) ? fileInputData : (fileInputData ? [fileInputData] : []);
     const validFiles = arrayFile.filter(f => fs.existsSync(f));
 
+    // Prefix log: cookie_chatgpt_N dan/atau pool#M
+    setChatgptLogCtx({
+        cookieId: (options && (options.cookieId || options.cookieKey || options.worker)) || '',
+        poolSlot: (options && (options.poolSlot != null ? options.poolSlot : options.slotId)) ?? '',
+    });
+    if (chatgptTag()) {
+        console.log(`[CHATGPT] ${chatgptTag()}task=${tipeTugas} thinking=${!!isThinkingMode} files=${validFiles.length}`);
+    }
+
     const existingPage = options && options.page ? options.page : null;
     const holdPage = existingPage ? (options.holdPage !== false) : false;
     let page = existingPage;
@@ -787,7 +853,14 @@ async function eksekusiChatGPT(tipeTugas, promptTeks, isThinkingMode, fileInputD
                 if (!pill) throw new Error('pill picture_v2 tidak muncul di kolom prompt');
                 console.log('[CHATGPT] Pill picture_v2 terpasang');
             } catch (err) {
-                console.log(`[CHATGPT] ÃƒÂ¢Ã…Â¡ ÃƒÂ¯Ã‚Â¸Ã‚Â Peringatan aktivasi mode gambar: ${err.message}`);
+                console.log(`[CHATGPT] ⚠️ Peringatan aktivasi mode gambar: ${err.message}`);
+                try {
+                    if (folderHasil) {
+                        const fp = path.join(folderHasil, `fail_gambar_mode_${Date.now()}.png`);
+                        await page.screenshot({ path: fp, fullPage: true }).catch(() => {});
+                        console.log(`[CHATGPT] 📸 SS gagal mode gambar → ${path.basename(fp)}`);
+                    }
+                } catch (_) {}
             }
         }
 
@@ -1152,4 +1225,4 @@ async function eksekusiChatGPT(tipeTugas, promptTeks, isThinkingMode, fileInputD
     }
 }
 
-module.exports = { eksekusiChatGPT };
+module.exports = { eksekusiChatGPT, setChatgptLogCtx };
