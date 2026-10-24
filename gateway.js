@@ -298,6 +298,40 @@ async function dapatkanSesiCookie() {
     return consumeSesiCookie();
 }
 
+
+// Daftar SS kegagalan terbaru (dashboard Vercel)
+app.get('/api/failures', (req, res) => {
+    try {
+        const files = fs.readdirSync(folderHasil)
+            .filter((f) => /^(fail_|error_trace_)/i.test(f) && /\.png$/i.test(f))
+            .map((f) => {
+                const st = fs.statSync(path.join(folderHasil, f));
+                return { name: f, url: `/files/${f}`, mtime: st.mtimeMs, size: st.size };
+            })
+            .sort((a, b) => b.mtime - a.mtime)
+            .slice(0, 40);
+        res.json({ status: 'ok', files });
+    } catch (e) {
+        res.status(500).json({ status: 'failed', error: e.message });
+    }
+});
+
+app.get('/api/health', async (req, res) => {
+    try {
+        const mode = await redis.get('proxy_mode').catch(() => null);
+        const ip = await redis.get('proxy_current_ip').catch(() => null);
+        res.json({
+            status: 'ok',
+            proxyMode: mode || proxyMode,
+            proxyIp: ip || null,
+            poolSize: parseInt(process.env.POOL_SIZE || '3', 10),
+            activeWorkers: jumlahTugasAktif,
+        });
+    } catch (e) {
+        res.json({ status: 'ok', proxyMode, activeWorkers: jumlahTugasAktif });
+    }
+});
+
 app.post('/api/generate', async (req, res) => {
     if (isRetiring) return res.status(503).json({ error: "Sistem estafet aktif. Silakan request ulang." });
 
