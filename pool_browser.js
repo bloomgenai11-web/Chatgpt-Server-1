@@ -8,7 +8,7 @@
 const path = require('path');
 const fs = require('fs');
 
-const POOL_SIZE = parseInt(process.env.POOL_SIZE || '10', 10);
+const POOL_SIZE = parseInt(process.env.POOL_SIZE || '3', 10); // mode pengujian default 3
 // Timeout cek sesi (login/signup vs composer) â€” 15 detik, lalu cookie berikutnya
 const SESI_TIMEOUT_MS = parseInt(process.env.POOL_SESI_TIMEOUT_MS || '15000', 10);
 const PROFIL_TIMEOUT_MS = parseInt(process.env.POOL_PROFIL_TIMEOUT_MS || String(SESI_TIMEOUT_MS), 10);
@@ -27,6 +27,38 @@ let deps = {
  
 const slots = [];
 let started = false;
+
+/** Log bertag [POOL_N] agar slot tidak campur di log paralel */
+(function patchPoolConsole() {
+  if (global.__poolLogPatched) return;
+  global.__poolLogPatched = true;
+  const orig = console.log.bind(console);
+  console.log = (...a) => {
+    if (a.length && typeof a[0] === 'string' && a[0].includes('[POOL]') && global.__poolSlotTag) {
+      const tag = global.__poolSlotTag;
+      if (!a[0].includes(tag)) {
+        a = a.slice();
+        a[0] = a[0].replace(/\[POOL\]/g, tag);
+      }
+    }
+    return orig(...a);
+  };
+})();
+
+function poolLog(slotOrId, ...args) {
+  const id = (slotOrId && typeof slotOrId === 'object') ? slotOrId.id : slotOrId;
+  const tag = id != null ? `[POOL_${id}]` : '[POOL]';
+  if (args.length && typeof args[0] === 'string') {
+    let s = args[0];
+    if (s.includes('[POOL]')) s = s.replace(/\[POOL\]/g, tag);
+    else if (!s.startsWith(tag)) s = tag + ' ' + s;
+    args = [s, ...args.slice(1)];
+  } else {
+    args = [tag, ...args];
+  }
+  console.log(...args);
+}
+
 
 function setDeps(d) {
   deps = { ...deps, ...d };
@@ -335,6 +367,7 @@ async function bootSlotOnce(slot, folderHasil) {
   }
 
   slot.state = 'booting';
+  global.__poolSlotTag = `[POOL_${slot.id}]`;
   console.log(`[POOL] slot#${slot.id} booting (peek cookie, index tidak maju)...`);
   await destroySlot(slot);
 
@@ -448,6 +481,7 @@ function slotPageAlive(slot) {
  */
 async function runTaskOnSlot(slot, { action, prompt, isThinkingMode, translatedFiles, folderHasil }) {
   if (!slot || slot.state !== 'busy') throw new Error('slot tidak busy');
+  global.__poolSlotTag = `[POOL_${slot.id}]`;
   const page = slot.page;
   const context = slot.context;
   if (!page || !context) throw new Error('slot page/context hilang');
@@ -472,7 +506,7 @@ async function runTaskOnSlot(slot, { action, prompt, isThinkingMode, translatedF
       translatedFiles || [],
       folderHasil,
       context,
-      { page, holdPage: true }
+      { page, holdPage: true, cookieId: slot.cookieId, poolSlot: slot.id }
     );
 
     return {
