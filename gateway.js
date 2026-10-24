@@ -19,13 +19,20 @@ const PROXY_HOST = process.env.PROXY_HOST || '';
 const PROXY_PORT = parseInt(process.env.PROXY_PORT || '0', 10);
 const PROXY_VERSION = parseInt(process.env.PROXY_VERSION || '5', 10);
 
-// Layer 2: Bright Data ISP (HTTP + auth) — setelah localtonet gagal
-const BD_PROXY_HOST = process.env.BD_PROXY_HOST || process.env.BRIGHTDATA_HOST || '';
-const BD_PROXY_PORT = parseInt(process.env.BD_PROXY_PORT || process.env.BRIGHTDATA_PORT || '0', 10);
-const BD_PROXY_USER = process.env.BD_PROXY_USER || process.env.BRIGHTDATA_USER || '';
-const BD_PROXY_PASS = process.env.BD_PROXY_PASS || process.env.BRIGHTDATA_PASS || '';
+// Layer 1 (browser): Cheap Proxy HTTP + auth
+// Env: CHEAP_PROXY_* (preferred) atau legacy BD_PROXY_* / BRIGHTDATA_* sebagai alias baca saja
+const CHEAP_PROXY_HOST = process.env.CHEAP_PROXY_HOST || process.env.BD_PROXY_HOST || process.env.BRIGHTDATA_HOST || '';
+const CHEAP_PROXY_PORT = parseInt(process.env.CHEAP_PROXY_PORT || process.env.BD_PROXY_PORT || process.env.BRIGHTDATA_PORT || '0', 10);
+const CHEAP_PROXY_USER = process.env.CHEAP_PROXY_USER || process.env.BD_PROXY_USER || process.env.BRIGHTDATA_USER || '';
+const CHEAP_PROXY_PASS = process.env.CHEAP_PROXY_PASS || process.env.BD_PROXY_PASS || process.env.BRIGHTDATA_PASS || '';
 
-// Layer 3 (opsional): Webshare / static HTTP — jika Bright Data juga gagal
+// Alias internal agar sisa kode yang masih menyebut BD_* tidak putus (nilai = cheap)
+const BD_PROXY_HOST = CHEAP_PROXY_HOST;
+const BD_PROXY_PORT = CHEAP_PROXY_PORT;
+const BD_PROXY_USER = CHEAP_PROXY_USER;
+const BD_PROXY_PASS = CHEAP_PROXY_PASS;
+
+// Layer static tidak dipakai di tier baru (cheap → none). Tetap parse env agar tidak error jika ada.
 const STATIC_PROXY_HOST = process.env.STATIC_PROXY_HOST || '';
 const STATIC_PROXY_PORT = parseInt(process.env.STATIC_PROXY_PORT || '0', 10);
 const STATIC_PROXY_USER = process.env.STATIC_PROXY_USER || '';
@@ -63,15 +70,13 @@ if (!fs.existsSync(folderTemp)) fs.mkdirSync(folderTemp);
 app.use('/files', express.static(folderHasil));
 
 // =====================================================================
-// RADAR PROXY (3 layer)
-// primary   = PROXY_* SOCKS (localtonet)
-// brightdata = BD_PROXY_* HTTP+auth ISP (setelah localtonet gagal)
-// static    = STATIC_* HTTP+auth Webshare (opsional L3)
-// none      = direct Codespace
-// Launch: opsi proxy Playwright (selaras bot_github.js), bukan camoufox_safe.
+// RADAR PROXY (2 layer — Cheap Proxy)
+// cheap  = CHEAP_PROXY_* HTTP+auth (primary untuk browser Camoufox)
+// none   = direct Codespace (fallback jika cheap mati / tidak dikonfigurasi)
+// Launch: opsi proxy Playwright. Logika lain (cookie, pool, QC, estafet) tidak diubah.
 // =====================================================================
 function initialProxyMode() {
-    if (BD_PROXY_HOST && BD_PROXY_PORT) return 'brightdata';
+    if (CHEAP_PROXY_HOST && CHEAP_PROXY_PORT) return 'cheap';
     return 'none';
 }
 let proxyMode = initialProxyMode();
@@ -93,20 +98,20 @@ function setMode(mode, ip, logLine) {
 }
 
 function monitorProxy() {
-    if (!BD_PROXY_HOST || !BD_PROXY_PORT) {
-        setMode('none', null, `\n[NETWORK] Bright Data tidak ada → internet Codespace (tanpa proxy).`);
+    if (!CHEAP_PROXY_HOST || !CHEAP_PROXY_PORT) {
+        setMode('none', null, `\n[NETWORK] Cheap Proxy tidak ada → internet Codespace (tanpa proxy).`);
         return;
     }
-    const auth = BD_PROXY_USER
-        ? `${encodeURIComponent(BD_PROXY_USER)}:${encodeURIComponent(BD_PROXY_PASS)}@`
+    const auth = CHEAP_PROXY_USER
+        ? `${encodeURIComponent(CHEAP_PROXY_USER)}:${encodeURIComponent(CHEAP_PROXY_PASS)}@`
         : '';
-    const bdUrl = `http://${auth}${BD_PROXY_HOST}:${BD_PROXY_PORT}`;
-    curlViaProxy(bdUrl, (ip) => {
+    const cheapUrl = `http://${auth}${CHEAP_PROXY_HOST}:${CHEAP_PROXY_PORT}`;
+    curlViaProxy(cheapUrl, (ip) => {
         if (ip) {
-            setMode('brightdata', ip, `\n[NETWORK] ✅ Bright Data ON (IP: ${ip}).`);
+            setMode('cheap', ip, `\n[NETWORK] ✅ Cheap Proxy ON (IP: ${ip}).`);
             return;
         }
-        setMode('none', null, `\n[NETWORK] ⚠️ Bright Data bermasalah → internet Codespace (tanpa proxy).`);
+        setMode('none', null, `\n[NETWORK] ⚠️ Cheap Proxy bermasalah → internet Codespace (tanpa proxy).`);
     });
 }
 
@@ -156,7 +161,7 @@ const CAMOUFOX_BASE_PREFS = {
 };
 
 /**
- * Launch Camoufox — HTTP proxy Playwright (Bright Data / static).
+ * Launch Camoufox — HTTP proxy Playwright (Cheap Proxy → none).
  * localtonet SOCKS TIDAK dipakai di browser (Unable to find the proxy server).
  * Opt-in eksperimen: GATEWAY_USE_LOCALTONET=true
  */
@@ -171,15 +176,15 @@ async function launchGatewayBrowser() {
         firefoxUserPrefs: prefs,
     };
 
-    // ChatGPT hanya 2 jalur: Bright Data, atau internet Codespace jika BD bermasalah.
-    if (proxyMode === 'brightdata' && BD_PROXY_HOST && BD_PROXY_PORT) {
+    // ChatGPT 2 jalur: Cheap Proxy, atau internet Codespace jika cheap bermasalah.
+    if (proxyMode === 'cheap' && CHEAP_PROXY_HOST && CHEAP_PROXY_PORT) {
         camoufoxOpts.geoip = true;
         camoufoxOpts.proxy = {
-            server: `http://${BD_PROXY_HOST}:${BD_PROXY_PORT}`,
+            server: `http://${CHEAP_PROXY_HOST}:${CHEAP_PROXY_PORT}`,
         };
-        if (BD_PROXY_USER) camoufoxOpts.proxy.username = BD_PROXY_USER;
-        if (BD_PROXY_PASS) camoufoxOpts.proxy.password = BD_PROXY_PASS;
-        label = 'BrightData';
+        if (CHEAP_PROXY_USER) camoufoxOpts.proxy.username = CHEAP_PROXY_USER;
+        if (CHEAP_PROXY_PASS) camoufoxOpts.proxy.password = CHEAP_PROXY_PASS;
+        label = 'CheapProxy';
         gunakanProxy = true;
     } else {
         prefs['network.proxy.type'] = 0;
