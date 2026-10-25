@@ -10,6 +10,8 @@ function setChatgptLogCtx({ cookieId, poolSlot } = {}) {
         cookieId: cookieId ? String(cookieId) : '',
         poolSlot: poolSlot != null && poolSlot !== '' ? String(poolSlot) : '',
     };
+    // Juga di global agar mudah di-debug
+    global.__chatgptLogCtx = _logCtx;
 }
 function chatgptTag() {
     const parts = [];
