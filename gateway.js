@@ -373,7 +373,10 @@ app.post('/api/generate', async (req, res) => {
                 browser = launched.browser;
                 context = await browser.newContext({ acceptDownloads: true });
                 await context.addCookies(sesi.cookies);
-                const hasil = await chatgptModule.eksekusiChatGPT(action, prompt, isThinkingMode, translatedFiles, folderHasil, context);
+                const hasil = await chatgptModule.eksekusiChatGPT(action, prompt, isThinkingMode, translatedFiles, folderHasil, context, {
+                    cookieId: sesi.id,
+                    poolSlot: poolSlot.id,
+                });
                 // Cookie pool dipakai tugas nyata → commit index (jangan dilewati di codespace berikutnya)
                 if (sesi.index) await commitSesiIndex(sesi.index);
                 res.json({
@@ -404,7 +407,9 @@ app.post('/api/generate', async (req, res) => {
         context = await browser.newContext({ acceptDownloads: true });
         await context.addCookies(sesi.cookies);
 
-        const hasil = await chatgptModule.eksekusiChatGPT(action, prompt, isThinkingMode, translatedFiles, folderHasil, context);
+        const hasil = await chatgptModule.eksekusiChatGPT(action, prompt, isThinkingMode, translatedFiles, folderHasil, context, {
+            cookieId: sesi.id,
+        });
 
         res.json({
             status: 'success',
@@ -465,7 +470,9 @@ async function jalankanDemoAwal(activeUrl) {
             context = await browser.newContext({ acceptDownloads: true });
             await context.addCookies(sesi.cookies);
 
-            const hasil = await chatgptModule.eksekusiChatGPT('CHAT', promptDemo, false, [], folderHasil, context);
+            const hasil = await chatgptModule.eksekusiChatGPT('CHAT', promptDemo, false, [], folderHasil, context, {
+                cookieId: sesi.id,
+            });
 
             console.log(`\n======================================================`);
             console.log(`🎉 [DEMO SUKSES] Percobaan ${attempt}/${MAX_QC_TRIES} — sistem sehat.`);
