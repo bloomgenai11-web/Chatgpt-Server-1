@@ -463,49 +463,137 @@ async function tungguStartVoice(page, timeoutMs = 45000) {
     throw new Error('TIMEOUT: Start Voice / Mulai Suara tidak muncul dalam ' + timeoutMs + 'ms');
 }
 
-async function klikSendAtauEnter(page) {
-    const sels = [
-        'button[type="submit"][aria-label="Kirim"]',
-        'button[aria-label="Kirim"]',
-        'button[aria-label="Kirim perintah"]',
-        'button[data-testid="send-button"]',
-        '#composer-submit-button[data-testid="send-button"]',
-        'button[aria-label="Send"]',
-        'button[aria-label="Send prompt"]',
-        'button[aria-label="Send message"]'
-    ];
-    for (const sel of sels) {
-        try {
-            const loc = page.locator(sel).last();
-            if (!(await loc.count().catch(() => 0))) continue;
-            await loc.click({ timeout: 3000, force: true });
-            await page.waitForTimeout(450);
-            return 'click:' + sel;
-        } catch (_) {}
-    }
+/** Tutup dialog "which image" tanpa Escape — Escape bisa melepas pill Buat gambar. */
+async function tutupDialogPengganggu(page) {
+    await page.evaluate(() => {
+        const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'));
+        for (const d of dialogs) {
+            const t = (d.innerText || '').toLowerCase();
+            if (!/which image do you like|gambar mana yang|which response|which answer/.test(t)) continue;
+            const btn = Array.from(d.querySelectorAll('button')).find((b) => {
+                const label = ((b.innerText || '') + ' ' + (b.getAttribute('aria-label') || '')).toLowerCase();
+                return /skip|lewati|not now|nanti|close|tutup|batal|cancel|later/.test(label);
+            });
+            if (btn) {
+                try { btn.click(); } catch (e) {}
+            }
+        }
+    }).catch(() => {});
+}
 
-    const evalClick = await page.evaluate(() => {
-        const buttons = Array.from(document.querySelectorAll('button'));
-        const btn = buttons.find((b) => {
+/**
+ * Klik koordinat nyata (mouse), bukan locator.click.
+ * locator.click sering timeout padahal elemen sudah ketemu.
+ */
+async function klikDiTitik(page, cari) {
+    const box = await page.evaluate(cari).catch(() => null);
+    if (!box || !Number.isFinite(box.x) || !Number.isFinite(box.y)) return '';
+    await page.mouse.click(box.x, box.y, { delay: 40 });
+    return box.label || 'mouse';
+}
+
+async function aktifkanModeGambar(page) {
+    for (let upaya = 1; upaya <= 3; upaya++) {
+        await page.keyboard.press('Escape').catch(() => {});
+        await page.waitForTimeout(200);
+        const plus = await klikDiTitik(page, () => {
+            const terlihat = (el) => {
+                if (!el || !el.isConnected) return false;
+                const r = el.getBoundingClientRect();
+                if (r.width < 8 || r.height < 8) return false;
+                const cs = window.getComputedStyle(el);
+                return cs.display !== 'none' && cs.visibility !== 'hidden';
+            };
+            const sels = [
+                '[data-testid="composer-plus-btn"]',
+                '#composer-plus-btn',
+                'button[data-composer-navigation-target="add-context"]',
+                'button[aria-label="Add files and more"]',
+                'button[aria-label="Tambahkan file dan lainnya"]'
+            ];
+            for (const sel of sels) {
+                const el = document.querySelector(sel);
+                if (!terlihat(el)) continue;
+                const r = el.getBoundingClientRect();
+                return { x: r.x + r.width / 2, y: r.y + r.height / 2, label: sel };
+            }
+            return null;
+        });
+        if (!plus) {
+            console.log(`[CHATGPT] tombol plus tidak ketemu (upaya ${upaya}/3)`);
+            continue;
+        }
+        console.log(`[CHATGPT] Plus dibuka via ${plus} (upaya ${upaya}/3)`);
+        await page.waitForTimeout(450);
+        const item = await klikDiTitik(page, () => {
+            const nodes = Array.from(document.querySelectorAll(
+                'button[data-list-navigation-item="true"], [role="menuitem"], [role="option"], [data-testid*="image"]'
+            ));
+            const el = nodes.find((n) => /buat gambar|create image/i.test(n.innerText || n.getAttribute('aria-label') || ''));
+            if (!el) return null;
+            const r = el.getBoundingClientRect();
+            if (r.width < 4 || r.height < 4) return null;
+            return { x: r.x + Math.min(24, r.width / 2), y: r.y + r.height / 2, label: (el.innerText || '').trim().slice(0, 40) };
+        });
+        if (!item) {
+            console.log(`[CHATGPT] menu Buat gambar tidak ketemu (upaya ${upaya}/3)`);
+            continue;
+        }
+        console.log(`[CHATGPT] Mode gambar diklik: ${item}`);
+        const mulai = Date.now();
+        while (Date.now() - mulai < 4000) {
+            const pill = await page.evaluate(() => !!document.querySelector(
+                '[data-system-hint-type="picture_v2"], span[data-inline-selection-pill][data-system-hint-label="Buat gambar"], span[data-inline-selection-pill][data-system-hint-label="Create image"]'
+            )).catch(() => false);
+            if (pill) return true;
+            await page.waitForTimeout(200);
+        }
+        console.log(`[CHATGPT] pill picture_v2 belum muncul (upaya ${upaya}/3)`);
+    }
+    return false;
+}
+
+async function klikSendAtauEnter(page) {
+    const how = await klikDiTitik(page, () => {
+        const terlihat = (el) => {
+            if (!el || !el.isConnected) return false;
+            if (el.getAttribute('aria-hidden') === 'true') return false;
+            const r = el.getBoundingClientRect();
+            if (r.width < 8 || r.height < 8) return false;
+            const cs = window.getComputedStyle(el);
+            return cs.display !== 'none' && cs.visibility !== 'hidden';
+        };
+        const buttons = Array.from(document.querySelectorAll('button')).filter(terlihat);
+        const cocok = (b) => {
             const testid = b.getAttribute('data-testid') || '';
             const aria = (b.getAttribute('aria-label') || '').trim();
-            if (testid === 'stop-button') return false;
-            return testid === 'send-button' ||
-                aria === 'Kirim' ||
-                aria === 'Kirim perintah' ||
-                aria === 'Send prompt' ||
-                aria === 'Send message' ||
-                aria === 'Send';
+            if (testid === 'stop-button' || /^stop$/i.test(aria) || /^hentikan jawaban$/i.test(aria)) return false;
+            return b.id === 'composer-submit-button' ||
+                testid === 'send-button' ||
+                /^kirim perintah$/i.test(aria) ||
+                /^kirim$/i.test(aria) ||
+                /^send prompt$/i.test(aria) ||
+                /^send message$/i.test(aria) ||
+                /^send$/i.test(aria);
+        };
+        const list = buttons.filter(cocok);
+        list.sort((a, b) => {
+            const skor = (el) => (el.id === 'composer-submit-button' ? 2 : 0) + (el.getAttribute('data-testid') === 'send-button' ? 1 : 0);
+            return skor(b) - skor(a);
         });
-        if (!btn) return false;
-        btn.click();
-        return true;
-    }).catch(() => false);
-    if (evalClick) {
-        await page.waitForTimeout(450);
-        return 'eval-click';
+        const btn = list[0];
+        if (!btn) return null;
+        const r = btn.getBoundingClientRect();
+        return {
+            x: r.x + r.width / 2,
+            y: r.y + r.height / 2,
+            label: 'mouse:' + (btn.getAttribute('aria-label') || btn.id || 'send')
+        };
+    });
+    if (how) {
+        await page.waitForTimeout(500);
+        return how;
     }
-
     await page.keyboard.press('Enter');
     await page.waitForTimeout(400);
     return 'enter';
@@ -514,7 +602,7 @@ async function klikSendAtauEnter(page) {
 async function kirimTerkonfirmasi(page, promptTeks) {
     const cup = (promptTeks || '').trim().slice(0, 48);
     const t0 = Date.now();
-    while (Date.now() - t0 < 5000) {
+    while (Date.now() - t0 < 8000) {
         const st = await bacaStatusTombolComposer(page);
         if (st.status === 'processing' || st.status === 'uploading' || st.stop) return true;
         const masihDiKolom = await page.evaluate((cuplikan) => {
@@ -522,7 +610,8 @@ async function kirimTerkonfirmasi(page, promptTeks) {
             const nodes = Array.from(document.querySelectorAll('#prompt-textarea, textarea, [contenteditable="true"]'));
             return nodes.some((el) => ((el.innerText || el.value || '').trim()).includes(cuplikan));
         }, cup).catch(() => false);
-        if (!masihDiKolom && st.status !== 'send_ready') return true;
+        // Prompt sudah keluar dari kolom = kirim terjadi, meski tombol belum sempat berganti jadi Stop.
+        if (!masihDiKolom) return true;
         await page.waitForTimeout(400);
     }
     return false;
@@ -663,11 +752,18 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
             await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
             await klikAreaKosong(page);
             await tungguComposerSiap(page, 30000);
+            await tutupDialogPengganggu(page);
         }
 
-        // Semua aksi (thinking / upload / prompt / send) hanya setelah Start Voice
-        await tungguStartVoice(page, 45000);
-        await stepShot(page, folderHasil, '03b_start_voice_ready');
+        // Upaya pertama: composer kosong, tunggu Start Voice.
+        // Upaya ulang: draft masih di kolom, tombolnya Kirim/Send — jangan tunggu suara 45 detik.
+        if (upayaKirim === 1) {
+            await tungguStartVoice(page, 45000);
+            await stepShot(page, folderHasil, '03b_start_voice_ready');
+        } else {
+            console.log('[CHATGPT] Upaya ulang: lewati tunggu Start Voice (draft membuat tombol tetap Kirim/Send)');
+            await tutupDialogPengganggu(page);
+        }
 
         if (isThinkingMode) {
             console.log(`[CHATGPT] ÃƒÂ°Ã…Â¸Ã‚Â§  Mengaktifkan Thinking Mode...`);
@@ -830,60 +926,42 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
         await page.waitForTimeout(400);
 
         if (tipeTugas === 'GAMBAR') {
-            console.log(`[CHATGPT] ÃƒÂ°Ã…Â¸Ã…Â½Ã‚Â¨ Mengaktifkan Mode Generasi Gambar...`);
-            try {
-                const plusSels = [
-                    '[data-testid="composer-plus-btn"]',
-                    '#composer-plus-btn',
-                    'button[data-composer-navigation-target="add-context"]',
-                    'button[aria-label="Add files and more"]',
-                    'button[aria-label="Tambahkan file dan lainnya"]'
-                ];
-                let plusTerbuka = false;
-                for (const sel of plusSels) {
-                    const loc = page.locator(sel).first();
-                    if (!(await loc.count().catch(() => 0))) continue;
-                    if (!(await loc.isVisible().catch(() => false))) continue;
-                    await loc.click({ timeout: 4000, force: true });
-                    plusTerbuka = true;
-                    console.log(`[CHATGPT] ÃƒÂ°Ã…Â¸Ã…Â½Ã‚Â¨ Plus dibuka via ${sel}`);
-                    break;
-                }
-                if (!plusTerbuka) throw new Error('tombol plus/add-context tidak ketemu');
-                const menu = page.locator('button[data-list-navigation-item="true"], [role="menuitem"]').filter({ hasText: /buat gambar|create image/i }).first();
-                await menu.waitFor({ state: 'attached', timeout: 8000 });
-                await menu.click({ force: true, timeout: 4000 });
-                console.log('[CHATGPT] Mode gambar diklik: Buat gambar');
-                let pill = false;
-                const pillMulai = Date.now();
-                while (Date.now() - pillMulai < 4000) {
-                    pill = await page.evaluate(() => !!document.querySelector('[data-system-hint-type="picture_v2"], span[data-inline-selection-pill][data-system-hint-label="Buat gambar"], span[data-inline-selection-pill][data-system-hint-label="Create image"]'));
-                    if (pill) break;
-                    await page.waitForTimeout(200);
-                }
-                if (!pill) throw new Error('pill picture_v2 tidak muncul di kolom prompt');
-                console.log('[CHATGPT] Pill picture_v2 terpasang');
-            } catch (err) {
-                console.log(`[CHATGPT] ⚠️ Peringatan aktivasi mode gambar: ${err.message}`);
+            console.log(`[CHATGPT] Mengaktifkan Mode Generasi Gambar...`);
+            const modeOk = await aktifkanModeGambar(page);
+            if (!modeOk) {
                 try {
                     if (folderHasil) {
                         const fp = path.join(folderHasil, `fail_gambar_mode_${Date.now()}.png`);
                         await page.screenshot({ path: fp, fullPage: true }).catch(() => {});
-                        console.log(`[CHATGPT] 📸 SS gagal mode gambar → ${path.basename(fp)}`);
+                        console.log(`[CHATGPT] SS gagal mode gambar → ${path.basename(fp)}`);
                     }
                 } catch (_) {}
+                throw new Error('MODE_GAMBAR_GAGAL: menu Buat gambar / pill picture_v2 tidak terpasang');
             }
+            console.log('[CHATGPT] Pill picture_v2 terpasang');
         }
 
 
         const sinyalSebelumKirim = await bacaStatusTombolComposer(page);
         copyAwal = sinyalSebelumKirim.copyCount || 0;
-        console.log(`[CHATGPT] ÃƒÂ°Ã…Â¸Ã…Â¡Ã¢â€šÂ¬ Mengirim tugas... btn=${sinyalSebelumKirim.status} aria="${sinyalSebelumKirim.aria}" copyAwal=${copyAwal}`);
-        const how = await klikSendAtauEnter(page);
-        console.log(`[CHATGPT] ÃƒÂ°Ã…Â¸Ã¢â‚¬Å“Ã‚Â¤ Send method: ${how}`);
-        terkirim = await kirimTerkonfirmasi(page, promptTeks);
+        console.log(`[CHATGPT] Mengirim tugas... btn=${sinyalSebelumKirim.status} aria="${sinyalSebelumKirim.aria}" copyAwal=${copyAwal}`);
+        let how = '';
+        for (let klik = 1; klik <= 3 && !terkirim; klik++) {
+            await tutupDialogPengganggu(page);
+            how = await klikSendAtauEnter(page);
+            console.log(`[CHATGPT] Send method: ${how} (klik ${klik}/3)`);
+            terkirim = await kirimTerkonfirmasi(page, promptTeks);
+            if (!terkirim) console.log('[CHATGPT] Kirim belum terkonfirmasi, klik lagi...');
+        }
         if (!terkirim) {
             console.log('[CHATGPT] Kirim belum terjadi (masih tombol Kirim / prompt masih di kolom). Tidak masuk radar.');
+            try {
+                if (folderHasil) {
+                    const fp = path.join(folderHasil, `fail_send_${Date.now()}.png`);
+                    await page.screenshot({ path: fp, fullPage: true }).catch(() => {});
+                    console.log(`[CHATGPT] SS gagal kirim → ${path.basename(fp)}`);
+                }
+            } catch (_) {}
             continue;
         }
         console.log('[CHATGPT] Kirim terkonfirmasi');
