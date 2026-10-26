@@ -2,18 +2,21 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const http = require('http');
+const { AsyncLocalStorage } = require('async_hooks');
 
-/** Tag log per cookie / pool agar parallel tasks tidak campur. */
-let _logCtx = { cookieId: '', poolSlot: '' };
+/** Tag log per task. ALS supaya request paralel tidak saling timpa nomor. */
+const _als = new AsyncLocalStorage();
 function setChatgptLogCtx({ cookieId, poolSlot } = {}) {
-    _logCtx = {
+    const ctx = {
         cookieId: cookieId ? String(cookieId) : '',
         poolSlot: poolSlot != null && poolSlot !== '' ? String(poolSlot) : '',
     };
-    // Juga di global agar mudah di-debug
-    global.__chatgptLogCtx = _logCtx;
+    const store = _als.getStore();
+    if (store) Object.assign(store, ctx);
+    else _als.enterWith(ctx);
 }
 function chatgptTag() {
+    const _logCtx = _als.getStore() || { cookieId: '', poolSlot: '' };
     const parts = [];
     if (_logCtx.cookieId) {
         const m = String(_logCtx.cookieId).match(/(\d+)\s*$/);
@@ -538,6 +541,12 @@ async function kirimTerkonfirmasi(page, promptTeks) {
  * @param {boolean} [options.holdPage] - jangan tutup page di finally (default true jika options.page)
  */
 async function eksekusiChatGPT(tipeTugas, promptTeks, isThinkingMode, fileInputData, folderHasil, context, options = {}) {
+    return _als.run({ cookieId: '', poolSlot: '' }, () => _eksekusiChatGPTImpl(
+        tipeTugas, promptTeks, isThinkingMode, fileInputData, folderHasil, context, options
+    ));
+}
+
+async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileInputData, folderHasil, context, options = {}) {
     let fileTersimpanArray = [];
     let arrayFile = Array.isArray(fileInputData) ? fileInputData : (fileInputData ? [fileInputData] : []);
     const validFiles = arrayFile.filter(f => fs.existsSync(f));
