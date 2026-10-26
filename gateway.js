@@ -335,6 +335,14 @@ app.get('/api/health', async (req, res) => {
 app.post('/api/generate', async (req, res) => {
     if (isRetiring) return res.status(503).json({ error: "Sistem estafet aktif. Silakan request ulang." });
 
+    const MAX_CONCURRENT = parseInt(process.env.MAX_CONCURRENT_TASKS || '3', 10);
+    if (jumlahTugasAktif >= MAX_CONCURRENT) {
+        return res.status(429).json({
+            status: 'failed',
+            error: `sibuk: ${jumlahTugasAktif}/${MAX_CONCURRENT} browser tugas aktif`,
+        });
+    }
+
     jumlahTugasAktif++;
 
     const { action = 'CHAT', prompt, isThinkingMode = false, fileArray = [] } = req.body;
@@ -388,11 +396,12 @@ app.post('/api/generate', async (req, res) => {
                 });
                 return;
             } catch (poolErr) {
-                console.error(`[GATEWAY] ⚠️ Pool gagal, cold start: ${poolErr.message}`);
+                console.error(`[GATEWAY] ⚠️ Pool slot gagal, TIDAK cold-start (hindari browser kedua): ${poolErr.message}`);
                 if (context) await context.close().catch(() => {});
                 if (browser) await browser.close().catch(() => {});
                 context = null;
                 browser = null;
+                throw poolErr;
             } finally {
                 if (typeof poolBrowser.releaseSlot === 'function') poolBrowser.releaseSlot(poolSlot);
             }
