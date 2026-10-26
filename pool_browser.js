@@ -450,6 +450,14 @@ function acquireReadySlot() {
   return slot;
 }
 
+let bootChain = Promise.resolve();
+
+function enqueueBoot(slot, folderHasil) {
+  bootChain = bootChain
+    .then(() => bootSlotLoop(slot, folderHasil))
+    .catch((e) => console.error(`[POOL] rebuild slot#${slot.id}:`, e.message));
+  return bootChain;
+}
 function releaseSlot(slot) {
   if (!slot) return;
   const id = slot.id;
@@ -459,8 +467,8 @@ function releaseSlot(slot) {
   slot.page = null;
   slot.context = null;
   slot.browser = null;
-  console.log(`[POOL] slot#${id} PAT terpakai → isi slot lagi`);
-  bootSlotLoop(slot, poolFolder).catch((e) => console.error(`[POOL] rebuild slot#${id}:`, e.message));
+  console.log(`[POOL] slot#${id} PAT terpakai → isi slot lagi (antri, 1 boot)`);
+  enqueueBoot(slot, poolFolder);
 }
 
 function slotPageAlive(slot) {
@@ -520,7 +528,7 @@ async function runTaskOnSlot(slot, { action, prompt, isThinkingMode, translatedF
     slot.state = 'dead';
     const fh = folderHasil;
     destroySlot(slot)
-      .then(() => bootSlotLoop(slot, fh))
+      .then(() => enqueueBoot(slot, fh))
       .catch((e) => console.error(`[POOL] rebuild slot#${id}:`, e.message));
   }
 }
