@@ -1,9 +1,9 @@
 /**
  * pool_browser.js
- * - Boot slot: PEEK cookie dari global_chatgpt_index (TANPA INCR), validasi sesi, simpan ke slot, tutup browser.
- * - Index Redis hanya maju saat gateway consumeSesiCookie / tugas nyata — pool tidak melompati akun.
- * - Satu antrian bersama gateway (cookie_chatgpt_1..MAX_COOKIES).
- * - Tugas: acquire slot → pakai cookies tersimpan → release → boot slot lagi (peek berikutnya).
+ * - Boot slot: sewa cookie bebas (TANPA INCR Redis), validasi sesi, simpan ke slot, tutup browser.
+ * - Satu cookie tidak boleh dipegang dua slot / dua browser.
+ * - Index Redis hanya maju saat tugas nyata commit — dan tidak meloncat melewati sewa yang masih hidup.
+ * - Tugas: acquire slot → pakai cookies tersimpan → tutup browser tugas → lepas sewa → boot slot lagi.
  */
 const path = require('path');
 const fs = require('fs');
@@ -19,8 +19,9 @@ let poolFolder = null;
 let deps = {
   launchGatewayBrowser: null,
   dapatkanSesiCookie: null,   // consume (maju index) — jangan dipakai di boot pool
-  peekSesiCookie: null,       // peek next cookie TANPA maju index
+  peekSesiCookie: null,       // claim cookie bebas TANPA maju index
   consumeSesiCookie: null,    // sama dengan dapatkanSesiCookie
+  releaseCookieLease: null,
   chatgptModule: null,
   MAX_COOKIES: 300,
 };
@@ -359,8 +360,8 @@ async function destroySlot(slot) {
  * folderHasil untuk stepShot (opsional).
  */
 async function bootSlotOnce(slot, folderHasil) {
-  // Pool HANYA peek cookie (tidak INCR global_chatgpt_index).
-  // Index maju hanya saat gateway consume / tugas memakai cookie.
+  // Pool HANYA sewa cookie bebas (tidak INCR global_chatgpt_index).
+  // Bukan current+slotId — rumus itu menabrak slot lain setelah index bergeser.
   const peekFn = deps.peekSesiCookie || deps.dapatkanSesiCookie;
   if (!deps.launchGatewayBrowser || !peekFn) {
     throw new Error('pool deps belum di-set (butuh launchGatewayBrowser + peekSesiCookie)');
@@ -368,13 +369,14 @@ async function bootSlotOnce(slot, folderHasil) {
 
   slot.state = 'booting';
   global.__poolSlotTag = `[POOL_${slot.id}]`;
-  console.log(`[POOL] slot#${slot.id} booting (peek cookie, index tidak maju)...`);
+  console.log(`[POOL] slot#${slot.id} booting (sewa cookie bebas, index tidak maju)...`);
   await destroySlot(slot);
+  slot.state = 'booting';
 
-  // offset = nomor slot → cookie_chatgpt_(current+slot.id) tanpa INCR
-  const sesi = await peekFn(slot.id);
-  console.log(`[POOL] slot#${slot.id} peek cookie=${sesi.id} idx=${sesi.index} (global index belum di-INCR)`);
+  const sesi = await peekFn({ exclude: slot.failIds || [] });
+  console.log(`[POOL] slot#${slot.id} sewa cookie=${sesi.id} idx=${sesi.index} (tidak dipakai slot/tugas lain)`);
   slot.cookieIndex = sesi.index;
+  slot.cookieId = sesi.id;
 
   const launched = await deps.launchGatewayBrowser();
   const browser = launched.browser;
@@ -382,8 +384,6 @@ async function bootSlotOnce(slot, folderHasil) {
   await context.addCookies(sesi.cookies);
   const page = await context.newPage();
   // setViewportSize HANG di Camoufox headless+Xvfb Codespace — jangan panggil.
-  // Ukuran dari launchGatewayBrowser (width/height).
-  // await page.setViewportSize({ width: 1920, height: 1080 });
   await installPopupKiller(page);
 
   try {
@@ -404,20 +404,25 @@ async function bootSlotOnce(slot, folderHasil) {
     try { await page.close().catch(() => {}); } catch (_) {}
     try { await context.close().catch(() => {}); } catch (_) {}
     try { await browser.close().catch(() => {}); } catch (_) {}
+    if (deps.releaseCookieLease) deps.releaseCookieLease(sesi.id);
+    slot.cookieId = null;
+    slot.cookieIndex = null;
+    slot.failIds = slot.failIds || [];
+    if (!slot.failIds.includes(sesi.id)) slot.failIds.push(sesi.id);
     throw e;
   }
 
-  slot.cookieId = sesi.id;
   slot.cookies = sesi.cookies;
   slot.readyAt = Date.now();
   slot.page = null;
   slot.context = null;
   slot.browser = null;
   slot.state = 'ready';
+  slot.failIds = [];
   try { await page.close().catch(() => {}); } catch (_) {}
   try { await context.close().catch(() => {}); } catch (_) {}
   try { await browser.close().catch(() => {}); } catch (_) {}
-  console.log(`[POOL] slot#${slot.id} PAT sehat disimpan cookie=${sesi.id} net=${launched.label} — browser ditutup`);
+  console.log(`[POOL] slot#${slot.id} PAT sehat disimpan cookie=${sesi.id} net=${launched.label} — browser ditutup, sewa tetap dipegang`);
 }
 
 async function bootSlotLoop(slot, folderHasil) {
@@ -427,7 +432,8 @@ async function bootSlotLoop(slot, folderHasil) {
       await bootSlotOnce(slot, folderHasil);
       return;
     } catch (e) {
-      console.log(`[POOL] slot#${slot.id} boot gagal (${e.message}) â€” cookie lain dalam ${REBUILD_DELAY_MS}ms`);
+      console.log(`[POOL] slot#${slot.id} boot gagal (${e.message}) — cookie lain dalam ${REBUILD_DELAY_MS}ms`);
+      if (String(e.message).includes('tidak ada cookie bebas')) slot.failIds = [];
       await destroySlot(slot);
       await new Promise((r) => setTimeout(r, REBUILD_DELAY_MS));
     }
@@ -444,7 +450,23 @@ async function bootAllSequential(folderHasil) {
 }
 
 function acquireReadySlot() {
-  const slot = slots.find((s) => s.state === 'ready' && s.cookies && s.cookies.length);
+  const held = new Set();
+  for (const s of slots) {
+    if (!s.cookieId) continue;
+    if (s.state !== 'ready' && s.state !== 'busy') continue;
+    if (held.has(s.cookieId) && s.state === 'ready') {
+      console.log(`[POOL] slot#${s.id} cookie ${s.cookieId} dobel — tidak diberikan, isi ulang`);
+      s.failIds = [s.cookieId];
+      if (deps.releaseCookieLease) deps.releaseCookieLease(s.cookieId);
+      s.state = 'dead';
+      s.cookies = null;
+      s.cookieId = null;
+      enqueueBoot(s, poolFolder);
+      continue;
+    }
+    held.add(s.cookieId);
+  }
+  const slot = slots.find((s) => s.state === 'ready' && s.cookies && s.cookies.length && s.cookieId);
   if (!slot) return null;
   slot.state = 'busy';
   return slot;
@@ -544,7 +566,7 @@ async function startPool(folderHasil) {
   }
   started = true;
   poolFolder = folderHasil || null;
-  console.log(`[POOL] start size=${POOL_SIZE} | peek-only cookie (shared global_chatgpt_index, MAX=${deps.MAX_COOKIES || '?'})`);
+  console.log(`[POOL] start size=${POOL_SIZE} | sewa cookie eksklusif (index Redis tidak maju saat boot, MAX=${deps.MAX_COOKIES || '?'})`);
   for (let i = 0; i < POOL_SIZE; i++) {
     slots.push({
       id: i + 1,
@@ -555,6 +577,7 @@ async function startPool(folderHasil) {
       cookieId: null,
       cookieIndex: null,
       cookies: null,
+      failIds: [],
       readyAt: null,
       refreshing: false,
       task: null,
