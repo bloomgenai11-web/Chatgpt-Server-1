@@ -66,7 +66,7 @@ function chatgptLog(...args) {
 }
 
 // =====================================================================
-// ÃƒÂ°Ã…Â¸Ã¢â‚¬ÂÃ¢â‚¬Ëœ FUNGSI SEDOT NATIVE (Menggunakan Context Playwright)
+// ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‹Å“ FUNGSI SEDOT NATIVE (Menggunakan Context Playwright)
 // =====================================================================
 async function sedotNative(urlTarget, destPath, context) {
     const cookiesArray = await context.cookies();
@@ -93,7 +93,7 @@ async function sedotNative(urlTarget, destPath, context) {
 }
 
 // =====================================================================
-// ÃƒÂ°Ã…Â¸Ã¢â‚¬Å“Ã‚Â¸ STEP SHOT (dari Script 2)
+// ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œÃƒâ€šÃ‚Â¸ STEP SHOT (dari Script 2)
 // =====================================================================
 async function stepShot(page, folderHasil, label) {
     try {
@@ -101,12 +101,12 @@ async function stepShot(page, folderHasil, label) {
         const safe = String(label || 'step').replace(/[^a-zA-Z0-9_-]+/g, '_').slice(0, 60);
         const fp = path.join(folderHasil, `step_${Date.now()}_${safe}.png`);
         await page.screenshot({ path: fp, fullPage: false }).catch(() => {});
-        console.log(`[CHATGPT] ÃƒÂ°Ã…Â¸Ã¢â‚¬Å“Ã‚Â¸ ${label} ÃƒÂ¢Ã¢â‚¬ Ã¢â‚¬â„¢ ${path.basename(fp)}`);
+        console.log(`[CHATGPT] ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œÃƒâ€šÃ‚Â¸ ${label} ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬ ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ ${path.basename(fp)}`);
     } catch (_) {}
 }
 
 // =====================================================================
-// ÃƒÂ°Ã…Â¸Ã¢â‚¬ËœÃ‚Â¤ TUNGGU PROFIL SIAP (dari Script 2)
+// ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸ÃƒÂ¢Ã¢â€šÂ¬Ã‹Å“Ãƒâ€šÃ‚Â¤ TUNGGU PROFIL SIAP (dari Script 2)
 // =====================================================================
 async function deteksiLoginAtauSignup(page) {
     return page.evaluate(() => {
@@ -147,18 +147,18 @@ async function deteksiLoginAtauSignup(page) {
 
 /**
  * Validasi sesi cookie: BUKAN lewat profil.
- * - Ada Login/Sign up ÃƒÂ¢Ã¢â‚¬ Ã¢â‚¬â„¢ cookie invalid ÃƒÂ¢Ã¢â‚¬ Ã¢â‚¬â„¢ throw COOKIE_INVALID
- * - Composer siap / tidak ada auth wall ÃƒÂ¢Ã¢â‚¬ Ã¢â‚¬â„¢ lanjut
+ * - Ada Login/Sign up ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬ ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ cookie invalid ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬ ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ throw COOKIE_INVALID
+ * - Composer siap / tidak ada auth wall ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬ ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ lanjut
  */
 async function tungguSesiValid(page, timeoutMs = 45000) {
-    console.log('[CHATGPT] ÃƒÂ°Ã…Â¸Ã¢â‚¬ÂÃ‚Â Cek sesi (login/signup = cookie invalid)...');
+    console.log('[CHATGPT] ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒâ€šÃ‚Â Cek sesi (login/signup = cookie invalid)...');
     const t0 = Date.now();
     let lastLog = 0;
 
     while (Date.now() - t0 < timeoutMs) {
         const auth = await deteksiLoginAtauSignup(page);
         if (auth.hit) {
-            console.log(`[CHATGPT] ÃƒÂ¢Ã‚ÂÃ…â€™ Auth wall: ${auth.via}`);
+            console.log(`[CHATGPT] ÃƒÆ’Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒâ€¦Ã¢â‚¬â„¢ Auth wall: ${auth.via}`);
             throw new Error('COOKIE_INVALID: terdeteksi tombol/halaman Login atau Sign up (' + auth.via + ')');
         }
 
@@ -176,13 +176,13 @@ async function tungguSesiValid(page, timeoutMs = 45000) {
         }).catch(() => false);
 
         if (composer) {
-            console.log(`[CHATGPT] ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ Sesi OK (composer ada, tanpa login wall) ${Date.now() - t0}ms`);
+            console.log(`[CHATGPT] ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã¢â‚¬Å“ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ Sesi OK (composer ada, tanpa login wall) ${Date.now() - t0}ms`);
             return;
         }
 
         if (Date.now() - lastLog > 2500) {
             lastLog = Date.now();
-            console.log(`[CHATGPT] sesiÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ ${Date.now() - t0}ms (tunggu composer / cek auth)`);
+            console.log(`[CHATGPT] sesiÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦ ${Date.now() - t0}ms (tunggu composer / cek auth)`);
         }
         await page.waitForTimeout(400);
     }
@@ -192,8 +192,8 @@ async function tungguSesiValid(page, timeoutMs = 45000) {
     if (auth2.hit) {
         throw new Error('COOKIE_INVALID: terdeteksi Login/Sign up (' + auth2.via + ')');
     }
-    // Tidak ada auth wall ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â biarkan tungguComposerSiap yang memutuskan
-    console.log('[CHATGPT] ÃƒÂ¢Ã…Â¡ ÃƒÂ¯Ã‚Â¸Ã‚Â Timeout cek sesi tanpa auth wall ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â lanjut ke composer');
+    // Tidak ada auth wall ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â biarkan tungguComposerSiap yang memutuskan
+    console.log('[CHATGPT] ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â¡ ÃƒÆ’Ã‚Â¯Ãƒâ€šÃ‚Â¸Ãƒâ€šÃ‚Â Timeout cek sesi tanpa auth wall ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â lanjut ke composer');
 }
 
 /** Klik nyata di area kosong (pinggir kanan tengah / bawah tengah) untuk menutup NUX/overlay */
@@ -215,7 +215,7 @@ async function klikAreaKosong(page) {
 }
 
 // =====================================================================
-// ÃƒÂ¢Ã‚ÂÃ‚Â³ TUNGGU COMPOSER SIAP (dari Script 2)
+// ÃƒÆ’Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒâ€šÃ‚Â³ TUNGGU COMPOSER SIAP (dari Script 2)
 // =====================================================================
 /** Cari elemen composer di semua varian UI ChatGPT */
 function composerFinderScript() {
@@ -233,7 +233,7 @@ function composerFinderScript() {
         push(document.querySelector('#prompt-textarea'), 'id');
         push(document.querySelector('[data-testid="prompt-textarea"]'), 'testid');
         document.querySelectorAll('div.ProseMirror[contenteditable="true"], [contenteditable="true"].ProseMirror').forEach((el) => push(el, 'prose'));
-        // UI penuh: placeholder "Ask ChatGPT" / "Tanyakan apa saja" ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â contenteditable di form utama
+        // UI penuh: placeholder "Ask ChatGPT" / "Tanyakan apa saja" ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â contenteditable di form utama
         document.querySelectorAll('[contenteditable="true"]').forEach((el) => {
             const ph = (el.getAttribute('data-placeholder') || el.getAttribute('aria-placeholder') || el.getAttribute('placeholder') || '').toLowerCase();
             const al = (el.getAttribute('aria-label') || '').toLowerCase();
@@ -258,7 +258,7 @@ function composerFinderScript() {
 }
 
 async function tungguComposerSiap(page, timeoutMs = 60000) {
-    console.log('[CHATGPT] ÃƒÂ¢Ã‚ÂÃ‚Â³ Menunggu kolom teks (composer) siap...');
+    console.log('[CHATGPT] ÃƒÆ’Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒâ€šÃ‚Â³ Menunggu kolom teks (composer) siap...');
     await page.waitForFunction(() => {
         const visible = (el) => {
             if (!el) return false;
@@ -284,7 +284,7 @@ async function tungguComposerSiap(page, timeoutMs = 60000) {
         }
         return false;
     }, { timeout: timeoutMs });
-    console.log('[CHATGPT] ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ Composer siap');
+    console.log('[CHATGPT] ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã¢â‚¬Å“ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ Composer siap');
 }
 
 async function suntikPromptKeComposer(page, promptTeks) {
@@ -356,11 +356,11 @@ async function suntikPromptKeComposer(page, promptTeks) {
 }
 
 /**
- * Sinyal tombol composer ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â hanya elemen TERLIHAT (abaikan salinan hidden).
+ * Sinyal tombol composer ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â hanya elemen TERLIHAT (abaikan salinan hidden).
  * Dari HTML nyata (ID + EN):
  *   send_ready : #composer-submit-button[data-testid=send-button]  aria "Kirim perintah" | "Send" | "Send prompt"
  *   processing : #composer-submit-button[data-testid=stop-button]  aria "Hentikan jawaban" | "Stop"
- *   uploading  : tombol submit ber-spinner (lampiran belum selesai) ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â nanti berganti jadi Stop
+ *   uploading  : tombol submit ber-spinner (lampiran belum selesai) ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â nanti berganti jadi Stop
  *   idle       : aria "Mulai Suara" | "Start Voice"  (bukan #composer-submit-button)
  * Selesai tugas = idle (suara) DAN tombol salin baru:
  *   [data-testid=copy-turn-action-button] aria "Salin respons" | "Copy"
@@ -410,6 +410,9 @@ async function bacaStatusTombolComposer(page) {
                     b.getAttribute('data-testid') === 'composer-plus-btn' ||
                     b.getAttribute('data-composer-navigation-target') === 'add-context',
                 submitId: b.id === 'composer-submit-button',
+                typeSubmit: (b.getAttribute('type') || '').toLowerCase() === 'submit',
+                busy: b.getAttribute('aria-busy') === 'true',
+                disabled: !!b.disabled || b.getAttribute('aria-disabled') === 'true',
                 // Ikon ini sama di semua bahasa. Yang berubah hanya aria-label.
                 // Hash file svg (icons-XXXX.svg) dan class Icon-XXXX boleh berubah; nama ikon tidak.
                 iconVoice: Array.from(b.querySelectorAll('use')).some((u) => {
@@ -457,9 +460,13 @@ async function bacaStatusTombolComposer(page) {
                 via = 'struktur';
             }
         }
-        const upload = !stop && list.find((x) =>
-            x.spin && (x.id === 'composer-submit-button' || x.testid === 'composer-submit-button') && !isSend(x) && x !== voice
-        );
+        // Lampiran belum selesai: tombol submit berputar, aria-busy, disabled.
+        // Tidak punya id Kirim/Stop dan labelnya beda tiap bahasa
+        // ("File upload pending" / "Pengunggahan file tertunda"). Jangan pakai teks.
+        const isUpload = (x) =>
+            !x.plus && !isStop(x) && x.inForm && x.spin && (x.busy || x.disabled) &&
+            (x.typeSubmit || x.submitId || x.testid === 'send-button' || x.testid === 'composer-submit-button');
+        const upload = !stop && list.find(isUpload);
         const isCopy = (x) =>
             x.testid === 'copy-turn-action-button' ||
             /^salin respons$/i.test(x.aria) ||
@@ -472,6 +479,7 @@ async function bacaStatusTombolComposer(page) {
         else if (upload) status = 'uploading';
         else if (send) status = 'send_ready';
         else if (voice) status = 'idle';
+        if (status === 'uploading') via = 'aria-busy';
         const top = stop || upload || send || voice || {};
         return {
             status,
@@ -486,27 +494,27 @@ async function bacaStatusTombolComposer(page) {
 }
 
 async function tungguStartVoice(page, timeoutMs = 45000) {
-    console.log('[CHATGPT] 👁 Menunggu Start Voice / Mulai Suara sebelum upload/aksi...');
+    console.log('[CHATGPT] ðŸ‘ Menunggu Start Voice / Mulai Suara sebelum upload/aksi...');
     const t0 = Date.now();
     let lastLog = 0;
     while (Date.now() - t0 < timeoutMs) {
         const st = await bacaStatusTombolComposer(page);
         if (st.status === 'idle' && st.voice) {
-            console.log(`[CHATGPT] ✅ Composer idle (${Date.now() - t0}ms) via=${st.via || '?'} aria="${st.aria}"`);
+            console.log(`[CHATGPT] âœ… Composer idle (${Date.now() - t0}ms) via=${st.via || '?'} aria="${st.aria}"`);
             return st;
         }
         // send_ready juga berarti composer siap input (kadang voice diganti kirim kosong)
-        // Paneer minta khusus Start Voice — jangan anggap send_ready cukup.
+        // Paneer minta khusus Start Voice â€” jangan anggap send_ready cukup.
         if (Date.now() - lastLog > 2500) {
             lastLog = Date.now();
-            console.log(`[CHATGPT] tunggu voice… ${Date.now() - t0}ms status=${st.status} voice=${st.voice} aria="${st.aria}"`);
+            console.log(`[CHATGPT] tunggu voiceâ€¦ ${Date.now() - t0}ms status=${st.status} voice=${st.voice} aria="${st.aria}"`);
         }
         await page.waitForTimeout(400);
     }
     throw new Error('TIMEOUT: Start Voice / Mulai Suara tidak muncul dalam ' + timeoutMs + 'ms');
 }
 
-/** Tutup dialog "which image" tanpa Escape — Escape bisa melepas pill Buat gambar. */
+/** Tutup dialog "which image" tanpa Escape â€” Escape bisa melepas pill Buat gambar. */
 async function tutupDialogPengganggu(page) {
     await page.evaluate(() => {
         const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'));
@@ -576,6 +584,17 @@ async function klikSendAtauEnter(page) {
         await page.waitForTimeout(500);
         return how;
     }
+    const pending = await page.evaluate(() => {
+        const buttons = Array.from(document.querySelectorAll('form button'));
+        return buttons.some((b) => {
+            if (b.id === 'composer-plus-btn') return false;
+            const type = (b.getAttribute('type') || '').toLowerCase();
+            const busy = b.getAttribute('aria-busy') === 'true' || b.disabled || b.getAttribute('aria-disabled') === 'true';
+            const spin = !!b.querySelector('[class*="animate-spin"]') || b.getAttribute('aria-busy') === 'true';
+            return type === 'submit' && busy && spin;
+        });
+    }).catch(() => false);
+    if (pending) return 'upload-pending';
     await page.keyboard.press('Enter');
     await page.waitForTimeout(400);
     return 'enter';
@@ -586,7 +605,11 @@ async function kirimTerkonfirmasi(page, promptTeks) {
     const t0 = Date.now();
     while (Date.now() - t0 < 8000) {
         const st = await bacaStatusTombolComposer(page);
-        if (st.status === 'processing' || st.status === 'uploading' || st.stop) return true;
+        // Stop, ATAU spinner upload (prompt masih di kolom sampai lampiran selesai, lalu jadi Stop sendiri).
+        if (st.status === 'processing' || st.status === 'uploading' || st.stop) {
+            if (st.status === 'uploading') console.log(`[CHATGPT] Kirim diterima: upload tertunda via=${st.via} aria="${st.aria}"`);
+            return true;
+        }
         const masihDiKolom = await page.evaluate((cuplikan) => {
             if (!cuplikan) return false;
             const nodes = Array.from(document.querySelectorAll('#prompt-textarea, textarea, [contenteditable="true"]'));
@@ -600,11 +623,11 @@ async function kirimTerkonfirmasi(page, promptTeks) {
 }
 
 // =====================================================================
-// ÃƒÂ°Ã…Â¸Ã‚Â§Ã‚Â¹ NUX memory (Got it / Mengerti) ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â minimal, tidak mengganggu composer
+// ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸Ãƒâ€šÃ‚Â§Ãƒâ€šÃ‚Â¹ NUX memory (Got it / Mengerti) ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â minimal, tidak mengganggu composer
 
 
 // =====================================================================
-// ÃƒÂ°Ã…Â¸Ã…Â¡Ã¢â€šÂ¬ EKSEKUTOR UTAMA CHATGPT (HIBRIDA MURNI)
+// ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸Ãƒâ€¦Ã‚Â¡ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ EKSEKUTOR UTAMA CHATGPT (HIBRIDA MURNI)
 // =====================================================================
 /**
  * @param {object} [options]
@@ -647,7 +670,7 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
         // Window size sudah dari launch Camoufox (width/height). Jangan panggil ini.
         // await page.setViewportSize({ width: 1920, height: 1080 });
 
-        // ÃƒÂ°Ã…Â¸Ã…â€™Ã…Â¸ SISTEM PEMBUNUH POP-UP OTONOM (selalu nyala, termasuk memory NUX)
+        // ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸Ãƒâ€¦Ã¢â‚¬â„¢Ãƒâ€¦Ã‚Â¸ SISTEM PEMBUNUH POP-UP OTONOM (selalu nyala, termasuk memory NUX)
         await page.addInitScript(() => {
             const dismissPopups = () => {
                 const btns = document.querySelectorAll('button');
@@ -655,7 +678,7 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
                     const txt = (btn.textContent || '').trim().toLowerCase();
                     if (
                         txt === 'got it' ||
-                        txt === 'ÃƒÂ§Ã…Â¸Ã‚Â¥ÃƒÂ©Ã‚ÂÃ¢â‚¬Å“ÃƒÂ¤Ã‚ÂºÃ¢â‚¬ ' ||
+                        txt === 'ÃƒÆ’Ã‚Â§Ãƒâ€¦Ã‚Â¸Ãƒâ€šÃ‚Â¥ÃƒÆ’Ã‚Â©Ãƒâ€šÃ‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã…â€œÃƒÆ’Ã‚Â¤Ãƒâ€šÃ‚ÂºÃƒÂ¢Ã¢â€šÂ¬ ' ||
                         txt === 'okay' ||
                         txt === 'ok' ||
                         txt === 'stay logged out' ||
@@ -676,7 +699,7 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
                     if (
                         t.includes('More relevant') ||
                         t.includes('personalized replies') ||
-                        t.includes('ÃƒÂ¤Ã‚Â¸Ã‚ÂªÃƒÂ¦Ã¢â€šÂ¬Ã‚Â§ÃƒÂ¥Ã…â€™Ã¢â‚¬â€œ') ||
+                        t.includes('ÃƒÆ’Ã‚Â¤Ãƒâ€šÃ‚Â¸Ãƒâ€šÃ‚ÂªÃƒÆ’Ã‚Â¦ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â§ÃƒÆ’Ã‚Â¥Ãƒâ€¦Ã¢â‚¬â„¢ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Å“') ||
                         t.includes('already uploaded')
                     ) {
                         const gotIt = Array.from(d.querySelectorAll('button')).find((b) =>
@@ -703,7 +726,7 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
             // ---------------------------------------------------------
             // 1) Navigasi (cold start only)
             // ---------------------------------------------------------
-            console.log(`\n[CHATGPT] ÃƒÂ°Ã…Â¸Ã…â€™Ã‚Â Membuka ChatGPT...`);
+            console.log(`\n[CHATGPT] ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸Ãƒâ€¦Ã¢â‚¬â„¢Ãƒâ€šÃ‚Â Membuka ChatGPT...`);
             await page.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded', timeout: 90000 }).catch(()=>{});
             await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
             await stepShot(page, folderHasil, '01_after_goto');
@@ -718,7 +741,7 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
             await klikAreaKosong(page);
 
             // ---------------------------------------------------------
-            // 3) Composer siap ÃƒÂ¢Ã¢â‚¬ Ã¢â‚¬â„¢ baru ketik prompt
+            // 3) Composer siap ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬ ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ baru ketik prompt
             // ---------------------------------------------------------
             await tungguComposerSiap(page, 60000);
             await stepShot(page, folderHasil, '03_composer_ready');
@@ -726,7 +749,7 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
             await page.waitForTimeout(400);
         } else {
             // Pool: page sudah HOLD. Jangan goto / jangan New chat.
-            console.log(`\n[CHATGPT] ÃƒÂ¢Ã…Â¡Ã‚Â¡ Lanjut di page pool (tanpa goto)...`);
+            console.log(`\n[CHATGPT] ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â¡Ãƒâ€šÃ‚Â¡ Lanjut di page pool (tanpa goto)...`);
             await tungguComposerSiap(page, 15000).catch(() => {});
             await page.waitForTimeout(300);
         }
@@ -744,7 +767,7 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
         }
 
         // Upaya pertama: composer kosong, tunggu Start Voice.
-        // Upaya ulang: draft masih di kolom, tombolnya Kirim/Send — jangan tunggu suara 45 detik.
+        // Upaya ulang: draft masih di kolom, tombolnya Kirim/Send â€” jangan tunggu suara 45 detik.
         if (upayaKirim === 1) {
             await tungguStartVoice(page, 45000);
             await stepShot(page, folderHasil, '03b_start_voice_ready');
@@ -754,16 +777,16 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
         }
 
         if (isThinkingMode) {
-            console.log(`[CHATGPT] ÃƒÂ°Ã…Â¸Ã‚Â§  Mengaktifkan Thinking Mode...`);
+            console.log(`[CHATGPT] ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸Ãƒâ€šÃ‚Â§  Mengaktifkan Thinking Mode...`);
             await page.keyboard.press('Control+Shift+M');
             await page.waitForTimeout(800);
         }
 
         // =================================================================
-        // ÃƒÂ°Ã…Â¸Ã…â€™Ã…Â¸ LOGIKA PELAMPIRAN DUAL-CORE (BERDASARKAN CHATGPT_1 DAN CHATGPT_2)
+        // ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸Ãƒâ€¦Ã¢â‚¬â„¢Ãƒâ€¦Ã‚Â¸ LOGIKA PELAMPIRAN DUAL-CORE (BERDASARKAN CHATGPT_1 DAN CHATGPT_2)
         // =================================================================
         if (validFiles.length > 0) {
-            console.log(`[CHATGPT] ÃƒÂ°Ã…Â¸Ã¢â‚¬Å“Ã…Â½ Memproses ${validFiles.length} File...`);
+            console.log(`[CHATGPT] ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œÃƒâ€¦Ã‚Â½ Memproses ${validFiles.length} File...`);
             
             // Pemisahan Jenis File
             const imageExtensions = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.heic'];
@@ -774,7 +797,7 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
             // JURUS 1: UPLOAD DOKUMEN (Menggunakan logika murni chatgpt_2.js)
             // -----------------------------------------------------------------
             if (docFiles.length > 0) {
-                console.log(`[CHATGPT] ÃƒÂ°Ã…Â¸Ã¢â‚¬Å“Ã¢â‚¬Å¾ Mengunggah Dokumen (Mode chatgpt_2.js)...`);
+                console.log(`[CHATGPT] ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾ Mengunggah Dokumen (Mode chatgpt_2.js)...`);
                 try {
                     try {
                         await page.locator('#composer-plus-btn, [data-testid="composer-plus-btn"]').click({ timeout: 3000 });
@@ -799,7 +822,7 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
                     }
 
                     if (!nativeDocUploaded) {
-                        console.log(`[CHATGPT] ÃƒÂ¢Ã…Â¡ ÃƒÂ¯Ã‚Â¸Ã‚Â Menggunakan Injeksi Clipboard untuk Dokumen...`);
+                        console.log(`[CHATGPT] ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â¡ ÃƒÆ’Ã‚Â¯Ãƒâ€šÃ‚Â¸Ãƒâ€šÃ‚Â Menggunakan Injeksi Clipboard untuk Dokumen...`);
                         await page.evaluate(() => {
                             const oldInput = document.getElementById('hacker-doc-input');
                             if (oldInput) oldInput.remove();
@@ -823,14 +846,14 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
                             }
                         });
                     }
-                } catch (e) { console.log(`[CHATGPT] ÃƒÂ¢Ã‚ÂÃ…â€™ Error Dokumen: ${e.message}`); }
+                } catch (e) { console.log(`[CHATGPT] ÃƒÆ’Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒâ€¦Ã¢â‚¬â„¢ Error Dokumen: ${e.message}`); }
             }
 
             // -----------------------------------------------------------------
             // JURUS 2: UPLOAD GAMBAR (Menggunakan logika murni chatgpt_1.js)
             // -----------------------------------------------------------------
             if (imageFiles.length > 0) {
-                console.log(`[CHATGPT] ÃƒÂ°Ã…Â¸Ã¢â‚¬â€œÃ‚Â¼ÃƒÂ¯Ã‚Â¸Ã‚Â Mengunggah Gambar (Mode chatgpt_1.js)...`);
+                console.log(`[CHATGPT] ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Å“Ãƒâ€šÃ‚Â¼ÃƒÆ’Ã‚Â¯Ãƒâ€šÃ‚Â¸Ãƒâ€šÃ‚Â Mengunggah Gambar (Mode chatgpt_1.js)...`);
                 try {
                     let nativeImgUploaded = false;
                     await page.waitForSelector('input[type="file"]', { state: 'attached', timeout: 5000 }).catch(()=>{});
@@ -845,7 +868,7 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
                     }
 
                     if (!nativeImgUploaded) {
-                        console.log(`[CHATGPT] ÃƒÂ¢Ã…Â¡ ÃƒÂ¯Ã‚Â¸Ã‚Â Menggunakan Injeksi Clipboard untuk Gambar...`);
+                        console.log(`[CHATGPT] ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â¡ ÃƒÆ’Ã‚Â¯Ãƒâ€šÃ‚Â¸Ãƒâ€šÃ‚Â Menggunakan Injeksi Clipboard untuk Gambar...`);
                         await page.evaluate(() => {
                             const oldInput = document.getElementById('hacker-image-input');
                             if (oldInput) oldInput.remove();
@@ -869,11 +892,11 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
                             }
                         });
                     }
-                } catch (e) { console.log(`[CHATGPT] ÃƒÂ¢Ã‚ÂÃ…â€™ Error Gambar: ${e.message}`); }
+                } catch (e) { console.log(`[CHATGPT] ÃƒÆ’Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒâ€¦Ã¢â‚¬â„¢ Error Gambar: ${e.message}`); }
             }
 
             // Pantau lampiran (dari Script 2)
-            console.log(`[CHATGPT] ÃƒÂ¢Ã‚ÂÃ‚Â³ Menunggu visualisasi file di layar...`);
+            console.log(`[CHATGPT] ÃƒÆ’Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒâ€šÃ‚Â³ Menunggu visualisasi file di layar...`);
             try {
                 await page.waitForFunction((expected) => {
                     const body = (document.body.innerText || '').toLowerCase();
@@ -898,18 +921,18 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
                     }
                     return false;
                 }, validFiles.length, { timeout: 45000 });
-                console.log('[CHATGPT] ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ Lampiran terdeteksi');
+                console.log('[CHATGPT] ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã¢â‚¬Å“ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ Lampiran terdeteksi');
                 await stepShot(page, folderHasil, '04_attachment_ok');
             } catch (e) {
-                console.log('[CHATGPT] ÃƒÂ¢Ã…Â¡ ÃƒÂ¯Ã‚Â¸Ã‚Â Timeout pantau lampiran:', e.message);
+                console.log('[CHATGPT] ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â¡ ÃƒÆ’Ã‚Â¯Ãƒâ€šÃ‚Â¸Ãƒâ€šÃ‚Â Timeout pantau lampiran:', e.message);
                 await stepShot(page, folderHasil, '04_attachment_timeout');
             }
 
         }
 
 
-        // JANGAN klikAreaKosong di antara suntik dan send ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â itu menghilangkan fokus composer
-        console.log(`[CHATGPT] ÃƒÂ¢Ã…Â¡Ã‚Â¡ Menyuntikkan Prompt...`);
+        // JANGAN klikAreaKosong di antara suntik dan send ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â itu menghilangkan fokus composer
+        console.log(`[CHATGPT] ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â¡Ãƒâ€šÃ‚Â¡ Menyuntikkan Prompt...`);
         await suntikPromptKeComposer(page, promptTeks);
         await page.waitForTimeout(400);
 
@@ -930,7 +953,7 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
                 if (folderHasil) {
                     const fp = path.join(folderHasil, `fail_send_${Date.now()}.png`);
                     await page.screenshot({ path: fp, fullPage: true }).catch(() => {});
-                    console.log(`[CHATGPT] SS gagal kirim → ${path.basename(fp)}`);
+                    console.log(`[CHATGPT] SS gagal kirim â†’ ${path.basename(fp)}`);
                 }
             } catch (_) {}
             continue;
@@ -941,8 +964,8 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
         if (!terkirim) throw new Error('SEND_GAGAL: tombol Kirim tidak mengirim tugas');
 
         // Radar: selesai saat tombol suara kembali (Mulai Suara / Start Voice).
-        // Jangan tunggu tombol Salin ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â di page pool aria/testid salin sering tidak cocok
-        // padahal jawaban sudah terlihat. Selama Hentikan jawaban / stop ÃƒÂ¢Ã¢â‚¬ Ã¢â‚¬â„¢ masih proses.
+        // Jangan tunggu tombol Salin ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â di page pool aria/testid salin sering tidak cocok
+        // padahal jawaban sudah terlihat. Selama Hentikan jawaban / stop ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬ ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ masih proses.
         const baseline = await page.evaluate(() => {
             const genImages = Array.from(document.querySelectorAll(
                 '[data-testid="generated-image-gallery"] img, [class*="generated-image-preview"] img, img[src*="backend-api/estuary"]'
@@ -1008,9 +1031,9 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
         const jumlahGambarAwal = baseline.jumlahGambarAwal;
         const baselineTextLen = baseline.baselineTextLen || 0;
         const baselineTextSnap = baseline.baselineText || '';
-        console.log(`[CHATGPT] ÃƒÂ°Ã…Â¸Ã¢â‚¬Å“Ã…  Baseline radar roles=${baseline.assistantRoles} legacy=${baseline.legacyAssist} textLen=${baselineTextLen} turns=${baseline.turnKeys || 0} gambar=${jumlahGambarAwal}`);
+        console.log(`[CHATGPT] ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œÃƒâ€¦  Baseline radar roles=${baseline.assistantRoles} legacy=${baseline.legacyAssist} textLen=${baselineTextLen} turns=${baseline.turnKeys || 0} gambar=${jumlahGambarAwal}`);
 
-        console.log('\n[CHATGPT] ÃƒÂ¢Ã‚ÂÃ‚Â³ Mulai radar (selesai = Mulai Suara / Start Voice, lalu ambil teks terlihat)...');
+        console.log('\n[CHATGPT] ÃƒÆ’Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒâ€šÃ‚Â³ Mulai radar (selesai = Mulai Suara / Start Voice, lalu ambil teks terlihat)...');
         let hasilEktraksi = null;
         let waktuMulai = Date.now();
         let lastTextLen = 0;
@@ -1120,7 +1143,6 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
                         if (uniqueImageUrls.length > 1 || isDoubleText) uniqueImageUrls = [uniqueImageUrls[uniqueImageUrls.length - 1]];
                         return { status: 'done', images: uniqueImageUrls, text: '', via: 'gallery', textLen: 0 };
                     }
-                    // Teks saja tidak menyelesaikan tugas gambar. Tunggu file gambar.
                     return { status: 'waiting', phase: 'gambar' };
                 }
 
@@ -1185,14 +1207,14 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
                     stableTicks++;
                 }
                 if (stableTicks >= 1) {
-                    console.log(`[CHATGPT] ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ Radar done via=${state.via || '?'} len=${state.textLen || 0} btn=${btnSt.status} aria="${btnSt.aria}" copy=${btnSt.copyCount}`);
+                    console.log(`[CHATGPT] ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã¢â‚¬Å“ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ Radar done via=${state.via || '?'} len=${state.textLen || 0} btn=${btnSt.status} aria="${btnSt.aria}" copy=${btnSt.copyCount}`);
                     hasilEktraksi = state.status === 'done' ? state : { ...state, status: 'done', text: state.text || null };
                     break;
                 }
             } else if (state.status === 'error') {
                 throw new Error(state.msg);
             } else if (state.status === 'force_refresh') {
-                console.log(`\n[CHATGPT] ÃƒÂ¢Ã…Â¡Ã‚Â¡ ${state.msg}`);
+                console.log(`\n[CHATGPT] ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â¡Ãƒâ€šÃ‚Â¡ ${state.msg}`);
                 break;
             } else {
                 if ((Date.now() - waktuMulai) % 8000 < 1600) {
@@ -1228,7 +1250,7 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
         if (!hasilEktraksi) throw new Error("TIMEOUT: ChatGPT gagal memuat respon.");
 
         if (hasilEktraksi.images && hasilEktraksi.images.length > 0) {
-            console.log(`\n[CHATGPT] ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ Mengunduh ${hasilEktraksi.images.length} gambar buatan AI...`);
+            console.log(`\n[CHATGPT] ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã¢â‚¬Å“ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ Mengunduh ${hasilEktraksi.images.length} gambar buatan AI...`);
             for (let i = 0; i < hasilEktraksi.images.length; i++) {
                 const imgUrl = hasilEktraksi.images[i];
                 const fileName = `chatgpt_IMG_${Date.now()}_${i + 1}.webp`;
@@ -1255,7 +1277,7 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
                     }
                     if (fs.existsSync(dest) && fs.statSync(dest).size > 0) fileTersimpanArray.push(fileName);
                 } catch (e) {
-                    console.log(`[CHATGPT] ÃƒÂ¢Ã…Â¡ ÃƒÂ¯Ã‚Â¸Ã‚Â Gagal unduh gambar: ${e.message}`);
+                    console.log(`[CHATGPT] ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â¡ ÃƒÆ’Ã‚Â¯Ãƒâ€šÃ‚Â¸Ãƒâ€šÃ‚Â Gagal unduh gambar: ${e.message}`);
                 }
             }
         } 
@@ -1267,11 +1289,11 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
         return { text: hasilEktraksi.text, files: fileTersimpanArray };
 
     } catch (err) {
-        console.log(`\n[CHATGPT ÃƒÂ¢Ã‚ÂÃ…â€™ CRITICAL ERROR]:`, err.message);
+        console.log(`\n[CHATGPT ÃƒÆ’Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒâ€¦Ã¢â‚¬â„¢ CRITICAL ERROR]:`, err.message);
         try {
             const errFilePath = path.join(folderHasil, `error_trace_${Date.now()}.png`);
             await page.screenshot({ path: errFilePath, fullPage: true }).catch(()=>{});
-            console.log(`ÃƒÂ°Ã…Â¸Ã¢â‚¬Å“Ã‚Â¸ FOTO BUKTI ERROR DISIMPAN DI: ${errFilePath}`);
+            console.log(`ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œÃƒâ€šÃ‚Â¸ FOTO BUKTI ERROR DISIMPAN DI: ${errFilePath}`);
         } catch (screenshotErr) {}
         throw err;
     } finally {
