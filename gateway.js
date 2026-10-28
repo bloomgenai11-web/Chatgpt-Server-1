@@ -362,7 +362,7 @@ app.get('/api/health', async (req, res) => {
             status: 'ok',
             proxyMode: mode || proxyMode,
             proxyIp: ip || null,
-            poolSize: parseInt(process.env.POOL_SIZE || '3', 10),
+            poolSize: 6,
             activeWorkers: jumlahTugasAktif,
         });
     } catch (e) {
@@ -373,7 +373,7 @@ app.get('/api/health', async (req, res) => {
 app.post('/api/generate', async (req, res) => {
     if (isRetiring) return res.status(503).json({ error: "Sistem estafet aktif. Silakan request ulang." });
 
-    const MAX_CONCURRENT = parseInt(process.env.MAX_CONCURRENT_TASKS || '3', 10);
+    const MAX_CONCURRENT = 6;
     if (jumlahTugasAktif >= MAX_CONCURRENT) {
         return res.status(429).json({
             status: 'failed',
