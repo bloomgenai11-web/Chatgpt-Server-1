@@ -595,9 +595,33 @@ async function klikSendAtauEnter(page) {
         });
     }).catch(() => false);
     if (pending) return 'upload-pending';
+    return '';
+}
+
+/** Enter hanya dipakai jika klik Kirim belum mengubah tombol. Fokus ke kolom dulu. */
+async function tekanEnterDiComposer(page) {
+    const box = await page.evaluate(() => {
+        const visible = (el) => {
+            if (!el) return false;
+            const st = window.getComputedStyle(el);
+            if (!st || st.display === 'none' || st.visibility === 'hidden') return false;
+            const r = el.getBoundingClientRect();
+            return r.width > 20 && r.height > 10;
+        };
+        const list = [];
+        const add = (el) => { if (visible(el)) list.push(el); };
+        add(document.querySelector('#prompt-textarea'));
+        add(document.querySelector('[data-testid="prompt-textarea"]'));
+        document.querySelectorAll('div.ProseMirror[contenteditable="true"], [contenteditable="true"]').forEach(add);
+        if (!list.length) return null;
+        list.sort((a, b) => b.getBoundingClientRect().y - a.getBoundingClientRect().y);
+        const r = list[0].getBoundingClientRect();
+        return { x: r.x + Math.min(28, r.width / 2), y: r.y + Math.min(18, r.height / 2) };
+    }).catch(() => null);
+    if (box) await page.mouse.click(box.x, box.y, { delay: 20 });
+    await page.waitForTimeout(120);
     await page.keyboard.press('Enter');
-    await page.waitForTimeout(400);
-    return 'enter';
+    await page.waitForTimeout(450);
 }
 
 async function kirimTerkonfirmasi(page, promptTeks) {
@@ -943,9 +967,14 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
         for (let klik = 1; klik <= 3 && !terkirim; klik++) {
             await tutupDialogPengganggu(page);
             how = await klikSendAtauEnter(page);
-            console.log(`[CHATGPT] Send method: ${how} (klik ${klik}/3)`);
+            console.log(`[CHATGPT] Send method: ${how || 'tidak ada tombol'} (klik ${klik}/3)`);
             terkirim = await kirimTerkonfirmasi(page, promptTeks);
-            if (!terkirim) console.log('[CHATGPT] Kirim belum terkonfirmasi, klik lagi...');
+            if (terkirim) break;
+            console.log('[CHATGPT] Kirim belum terkonfirmasi, tekan Enter di kolom...');
+            await tekanEnterDiComposer(page);
+            console.log(`[CHATGPT] Send method: enter (setelah klik ${klik}/3)`);
+            terkirim = await kirimTerkonfirmasi(page, promptTeks);
+            if (!terkirim) console.log('[CHATGPT] Enter belum terkonfirmasi, ulang klik + Enter...');
         }
         if (!terkirim) {
             console.log('[CHATGPT] Kirim belum terjadi (masih tombol Kirim / prompt masih di kolom). Tidak masuk radar.');
