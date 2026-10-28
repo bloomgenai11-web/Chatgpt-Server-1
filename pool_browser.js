@@ -8,7 +8,7 @@
 const path = require('path');
 const fs = require('fs');
 
-const POOL_SIZE = parseInt(process.env.POOL_SIZE || '3', 10); // mode pengujian default 3
+const POOL_SIZE = 6; // paksa 6, env lama POOL_SIZE=3 tidak menimpa
 // Timeout cek sesi (login/signup vs composer) â€” 15 detik, lalu cookie berikutnya
 const SESI_TIMEOUT_MS = parseInt(process.env.POOL_SESI_TIMEOUT_MS || '15000', 10);
 const PROFIL_TIMEOUT_MS = parseInt(process.env.POOL_PROFIL_TIMEOUT_MS || String(SESI_TIMEOUT_MS), 10);
