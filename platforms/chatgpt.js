@@ -535,67 +535,6 @@ async function klikDiTitik(page, cari) {
     return box.label || 'mouse';
 }
 
-async function aktifkanModeGambar(page) {
-    for (let upaya = 1; upaya <= 3; upaya++) {
-        await page.keyboard.press('Escape').catch(() => {});
-        await page.waitForTimeout(200);
-        const plus = await klikDiTitik(page, () => {
-            const terlihat = (el) => {
-                if (!el || !el.isConnected) return false;
-                const r = el.getBoundingClientRect();
-                if (r.width < 8 || r.height < 8) return false;
-                const cs = window.getComputedStyle(el);
-                return cs.display !== 'none' && cs.visibility !== 'hidden';
-            };
-            const sels = [
-                '[data-testid="composer-plus-btn"]',
-                '#composer-plus-btn',
-                'button[data-composer-navigation-target="add-context"]',
-                'button[aria-label="Add files and more"]',
-                'button[aria-label="Tambahkan file dan lainnya"]'
-            ];
-            for (const sel of sels) {
-                const el = document.querySelector(sel);
-                if (!terlihat(el)) continue;
-                const r = el.getBoundingClientRect();
-                return { x: r.x + r.width / 2, y: r.y + r.height / 2, label: sel };
-            }
-            return null;
-        });
-        if (!plus) {
-            console.log(`[CHATGPT] tombol plus tidak ketemu (upaya ${upaya}/3)`);
-            continue;
-        }
-        console.log(`[CHATGPT] Plus dibuka via ${plus} (upaya ${upaya}/3)`);
-        await page.waitForTimeout(450);
-        const item = await klikDiTitik(page, () => {
-            const nodes = Array.from(document.querySelectorAll(
-                'button[data-list-navigation-item="true"], [role="menuitem"], [role="option"], [data-testid*="image"]'
-            ));
-            const el = nodes.find((n) => /buat gambar|create image/i.test(n.innerText || n.getAttribute('aria-label') || ''));
-            if (!el) return null;
-            const r = el.getBoundingClientRect();
-            if (r.width < 4 || r.height < 4) return null;
-            return { x: r.x + Math.min(24, r.width / 2), y: r.y + r.height / 2, label: (el.innerText || '').trim().slice(0, 40) };
-        });
-        if (!item) {
-            console.log(`[CHATGPT] menu Buat gambar tidak ketemu (upaya ${upaya}/3)`);
-            continue;
-        }
-        console.log(`[CHATGPT] Mode gambar diklik: ${item}`);
-        const mulai = Date.now();
-        while (Date.now() - mulai < 4000) {
-            const pill = await page.evaluate(() => !!document.querySelector(
-                '[data-system-hint-type="picture_v2"], span[data-inline-selection-pill][data-system-hint-label="Buat gambar"], span[data-inline-selection-pill][data-system-hint-label="Create image"]'
-            )).catch(() => false);
-            if (pill) return true;
-            await page.waitForTimeout(200);
-        }
-        console.log(`[CHATGPT] pill picture_v2 belum muncul (upaya ${upaya}/3)`);
-    }
-    return false;
-}
-
 async function klikSendAtauEnter(page) {
     const how = await klikDiTitik(page, () => {
         const terlihat = (el) => {
@@ -688,6 +627,12 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
         cookieId: (options && (options.cookieId || options.cookieKey || options.worker)) || '',
         poolSlot: (options && (options.poolSlot != null ? options.poolSlot : options.slotId)) ?? '',
     });
+    if (String(tipeTugas || '').toUpperCase() === 'GAMBAR') {
+        const raw = String(promptTeks || '').trim();
+        promptTeks = /^\[create image\]/i.test(raw) ? raw : `[Create Image] ${raw}`.trim();
+        console.log(`[CHATGPT] Mode gambar tanpa klik plus. Prompt diawali [Create Image]`);
+    }
+
     if (chatgptTag()) {
         console.log(`[CHATGPT] ${chatgptTag()}task=${tipeTugas} thinking=${!!isThinkingMode} files=${validFiles.length}`);
     }
@@ -968,23 +913,6 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
         await suntikPromptKeComposer(page, promptTeks);
         await page.waitForTimeout(400);
 
-        if (tipeTugas === 'GAMBAR') {
-            console.log(`[CHATGPT] Mengaktifkan Mode Generasi Gambar...`);
-            const modeOk = await aktifkanModeGambar(page);
-            if (!modeOk) {
-                try {
-                    if (folderHasil) {
-                        const fp = path.join(folderHasil, `fail_gambar_mode_${Date.now()}.png`);
-                        await page.screenshot({ path: fp, fullPage: true }).catch(() => {});
-                        console.log(`[CHATGPT] SS gagal mode gambar → ${path.basename(fp)}`);
-                    }
-                } catch (_) {}
-                throw new Error('MODE_GAMBAR_GAGAL: menu Buat gambar / pill picture_v2 tidak terpasang');
-            }
-            console.log('[CHATGPT] Pill picture_v2 terpasang');
-        }
-
-
         const sinyalSebelumKirim = await bacaStatusTombolComposer(page);
         copyAwal = sinyalSebelumKirim.copyCount || 0;
         console.log(`[CHATGPT] Mengirim tugas... btn=${sinyalSebelumKirim.status} aria="${sinyalSebelumKirim.aria}" copyAwal=${copyAwal}`);
@@ -1184,19 +1112,15 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
                     return out.join('\n').trim();
                 };
 
-                if (mode === 'GAMBAR') {
+                                if (mode === 'GAMBAR') {
                     if (galleryMasihLoading()) return { status: 'waiting', phase: 'gambar-loading' };
                     const allGenImages = getGenImages();
                     if (allGenImages.length > gAwal) {
                         let uniqueImageUrls = [...new Set(allGenImages.slice(gAwal).map((img) => img.currentSrc || img.src))];
                         if (uniqueImageUrls.length > 1 || isDoubleText) uniqueImageUrls = [uniqueImageUrls[uniqueImageUrls.length - 1]];
-                        const caption = extractAssistantText();
-                        return { status: 'done', images: uniqueImageUrls, text: caption.text || null, via: 'gallery', textLen: (caption.text || '').length };
+                        return { status: 'done', images: uniqueImageUrls, text: '', via: 'gallery', textLen: 0 };
                     }
-                    const extracted = extractAssistantText();
-                    if (extracted.text.length > 10 && extracted.text.slice(0, 240) !== (tSnap || '')) {
-                        return { status: 'done', text: `ÃƒÂ¢Ã…Â¡ ÃƒÂ¯Ã‚Â¸Ã‚Â Peringatan (Gambar gagal dibuat AI):\n${extracted.text}`, images: [], via: extracted.via, textLen: extracted.text.length };
-                    }
+                    // Teks saja tidak menyelesaikan tugas gambar. Tunggu file gambar.
                     return { status: 'waiting', phase: 'gambar' };
                 }
 
