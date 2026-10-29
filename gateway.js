@@ -212,11 +212,14 @@ let isRetiring = false;
 let jumlahTugasAktif = 0;
 
 /**
- * Index cookie di Redis: `global_chatgpt_index` (1..MAX_COOKIES).
- * Putaran: 1, 2, 3, ... 300, lalu kembali ke 1.
- * Pool yang hanya mengecek tidak menggeser index, supaya nomor itu tidak terlewati.
- * Cookie yang baru selesai tugas tidak diambil lagi sebelum kursurnya lewat.
- * Dua browser tidak boleh memegang nomor yang sama.
+ * Index cookie GLOBAL di Redis: key `global_chatgpt_index` (1..MAX_COOKIES).
+ * Nilai = index cookie TERAKHIR yang sudah di-CONSUME untuk tugas nyata.
+ *
+ * Satu cookie = satu browser. Sewa ada di memori proses (bukan Redis):
+ * pool boot, cold start, dan QC memanggil claimFreeCookie().
+ * Slot lain tidak boleh mengambil nomor yang masih disewa.
+ * Redis TIDAK maju saat pool hanya memeriksa. Maju saat tugas sukses (commit),
+ * dan tidak meloncat melewati cookie yang masih disewa slot lain.
  */
 function formatCookiePayload(rawData, cookieKey, index) {
     return {
@@ -228,20 +231,50 @@ function formatCookiePayload(rawData, cookieKey, index) {
     };
 }
 
-/** Sedang dipegang browser (pool, tugas, atau QC). */
+/** cookie_chatgpt_N yang sedang dipegang sebuah browser (pool siap, tugas, atau QC). */
 const cookieLeases = new Set();
-/** Selesai tugas pada putaran ini, kursor belum melewatinya. Bukan larangan selamanya. */
-const cookieTerpakai = new Set();
-let riwayatTerpakaiDimuat = false;
+/** Sudah dipakai tugas nyata. Tidak boleh di-roll lagi, meski sewanya sudah lepas. */
+const cookieSpent = new Set();
+const SPENT_KEY = 'chatgpt_cookie_spent';
 
-function cookieKeyOf(index) {
-    return `cookie_chatgpt_${index}`;
+async function loadSpentCookies() {
+    try {
+        const raw = await redis.get(SPENT_KEY);
+        const arr = Array.isArray(raw) ? raw : (typeof raw === 'string' && raw.trim() ? JSON.parse(raw) : []);
+        for (const id of arr || []) cookieSpent.add(String(id));
+        if (cookieSpent.size) console.log(`[COOKIE] spent tersimpan ${cookieSpent.size} (tidak di-roll)`);
+    } catch (e) {
+        console.log('[COOKIE] load spent gagal: ' + e.message);
+    }
 }
 
-function ringNext(n) {
-    const x = parseInt(n, 10);
-    if (!Number.isFinite(x) || x < 1 || x >= MAX_COOKIES) return 1;
-    return x + 1;
+async function persistSpent() {
+    await redis.set(SPENT_KEY, JSON.stringify([...cookieSpent]));
+}
+
+/** Geser index melewati deretan cookie yang sudah habis. Lubang yang baru disewa (belum tugas) tidak dilewati. */
+async function advanceIndexPastSpent() {
+    let current = await getCurrentCookieIndex();
+    let advanced = current;
+    let next = wrapIndex((current || 0) + 1);
+    for (let guard = 0; guard < MAX_COOKIES; guard++) {
+        if (!cookieSpent.has(cookieKeyOf(next))) break;
+        advanced = next;
+        next = wrapIndex(advanced + 1);
+        if (next === advanced) break;
+    }
+    if (advanced && advanced !== current) {
+        await redis.set('global_chatgpt_index', advanced);
+        console.log(`[COOKIE] commit index ${current} â†’ ${advanced} (lewati yang sudah habis)`);
+    }
+}
+
+async function markCookieSpent(id) {
+    if (!id || cookieSpent.has(id)) return;
+    cookieSpent.add(id);
+    console.log(`[COOKIE] habis dipakai ${id} (tidak di-roll, spent=${cookieSpent.size})`);
+    try { await persistSpent(); } catch (e) { console.log('[COOKIE] simpan spent gagal: ' + e.message); }
+    try { await advanceIndexPastSpent(); } catch (e) { console.log('[COOKIE] geser index gagal: ' + e.message); }
 }
 
 async function getCurrentCookieIndex() {
@@ -250,32 +283,25 @@ async function getCurrentCookieIndex() {
     return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
-async function muatPutaran() {
-    if (riwayatTerpakaiDimuat) return;
-    try {
-        const members = await redis.smembers('chatgpt_cookie_putaran');
-        if (Array.isArray(members)) {
-            for (const id of members) {
-                if (id) cookieTerpakai.add(String(id));
-            }
-        }
-        riwayatTerpakaiDimuat = true;
-        const current = await getCurrentCookieIndex();
-        console.log(`[COOKIE] putaran aktif=${cookieTerpakai.size} index=${current} selanjutnya=${ringNext(current)} (1â†’${MAX_COOKIES}â†’1)`);
-    } catch (e) {
-        console.log(`[COOKIE] gagal muat putaran, akan dicoba lagi: ${e.message}`);
-    }
+function wrapIndex(n) {
+    let x = ((n - 1) % MAX_COOKIES) + 1;
+    if (x < 1) x = 1;
+    return x;
 }
 
-/** Semua nomor di antara current dan n pada cincin sudah selesai. Sewa saja tidak dihitung. */
-function bisaMajuKe(current, n) {
-    if (!current) return true;
-    let i = ringNext(current);
+function cookieKeyOf(index) {
+    return `cookie_chatgpt_${index}`;
+}
+
+/** Ada sewa di antara current dan n (n sendiri tidak dihitung). */
+function leasedBetween(current, n) {
+    if (!current || current === n) return false;
+    let i = wrapIndex(current + 1);
     for (let guard = 0; guard < MAX_COOKIES && i !== n; guard++) {
-        if (!cookieTerpakai.has(cookieKeyOf(i))) return false;
-        i = ringNext(i);
+        if (cookieLeases.has(cookieKeyOf(i))) return true;
+        i = wrapIndex(i + 1);
     }
-    return true;
+    return false;
 }
 
 function releaseCookieLease(id) {
@@ -286,96 +312,60 @@ function releaseCookieLease(id) {
 }
 
 /**
- * Cookie berikutnya pada cincin 1..MAX..1.
- * exclude: gagal boot di slot ini.
- * advanceRedis: geser kursor hanya jika tidak melompati cookie yang belum selesai.
+ * Ambil cookie bebas berikutnya setelah index Redis.
+ * exclude: id yang baru gagal di slot ini, jangan diambil lagi pada percobaan ini.
+ * advanceRedis: geser index hanya jika tidak ada sewa di depannya.
  */
 async function claimFreeCookie({ exclude = [], advanceRedis = false } = {}) {
-    await muatPutaran();
     const skip = new Set(exclude || []);
     const current = await getCurrentCookieIndex();
-    let index = current <= 0 ? 1 : ringNext(current);
-    for (let step = 0; step < MAX_COOKIES; step++) {
+    for (let step = 1; step <= MAX_COOKIES; step++) {
+        const index = wrapIndex(current + step);
         const cookieKey = cookieKeyOf(index);
-        if (cookieTerpakai.has(cookieKey)) {
-            console.log(`[COOKIE] lewati ${cookieKey} â€” sudah dipakai putaran ini`);
-            index = ringNext(index);
+        if (cookieSpent.has(cookieKey)) {
+            console.log(`[COOKIE] lewati ${cookieKey} â€” sudah dipakai tugas, tidak di-roll`);
             continue;
         }
         if (cookieLeases.has(cookieKey)) {
             console.log(`[COOKIE] lewati ${cookieKey} â€” sedang dipakai browser lain`);
-            index = ringNext(index);
             continue;
         }
-        if (skip.has(cookieKey) || skip.has(index)) {
-            index = ringNext(index);
-            continue;
-        }
+        if (skip.has(cookieKey) || skip.has(index)) continue;
         const rawData = await redis.get(cookieKey);
-        if (!rawData) {
-            index = ringNext(index);
-            continue;
-        }
+        if (!rawData) continue;
         cookieLeases.add(cookieKey);
-        if (advanceRedis && bisaMajuKe(current, index)) {
+        if (advanceRedis && !leasedBetween(current, index)) {
             await redis.set('global_chatgpt_index', index);
             console.log(`[COOKIE] consume index ${current} â†’ ${index}`);
         }
         console.log(`[COOKIE] sewa ${cookieKey} (sewa aktif=${cookieLeases.size})`);
         return formatCookiePayload(rawData, cookieKey, index);
     }
-    throw new Error(`[COOKIE] tidak ada cookie bebas pada putaran 1-${MAX_COOKIES}`);
+    throw new Error('[COOKIE] tidak ada cookie bebas â€” semua sedang disewa browser lain');
 }
 
-/** Cold start / QC. Index maju hanya kalau tidak melompati antrian. */
+/** Cold start / QC: sewa cookie berikutnya. Index Redis maju hanya jika tidak menabrak sewa pool. */
 async function consumeSesiCookie() {
     return claimFreeCookie({ advanceRedis: true });
 }
 
-/** Pool boot. Tidak menggeser index Redis. */
+/**
+ * Pool boot. Offset angka lama (current+slotId) TIDAK dipakai lagi â€”
+ * itu yang membuat dua slot memegang cookie yang sama setelah index bergeser.
+ */
 async function peekSesiCookie(arg = 1) {
     const exclude = (arg && typeof arg === 'object' && Array.isArray(arg.exclude)) ? arg.exclude : [];
     return claimFreeCookie({ exclude, advanceRedis: false });
 }
 
-/** Kursor mengikuti cincin, termasuk 300 â†’ 1, hanya melewati yang sudah selesai. */
-async function geserKursor() {
-    let cursor = await getCurrentCookieIndex();
-    const awal = cursor;
-    for (let guard = 0; guard < MAX_COOKIES; guard++) {
-        const next = cursor <= 0 ? 1 : ringNext(cursor);
-        const key = cookieKeyOf(next);
-        if (!cookieTerpakai.has(key)) break;
-        cookieTerpakai.delete(key);
-        await redis.srem('chatgpt_cookie_putaran', key).catch(() => {});
-        cursor = next;
-        if (awal && cursor === awal) break;
-    }
-    if (cursor !== awal) {
-        await redis.set('global_chatgpt_index', cursor);
-        console.log(`[COOKIE] putar index ${awal} â†’ ${cursor}`);
-    }
-}
-
 /**
- * Tugas nyata selesai (sukses atau gagal).
- * Nomor ini tidak diambil lagi sampai kursor melewatinya dan putaran kembali.
+ * Setelah tugas benar-benar memakai cookie N.
+ * Tidak meloncat melewati cookie yang masih disewa slot/tugas lain.
  */
-async function tandaiCookieTerpakai(id) {
-    if (!id) return;
-    await muatPutaran();
-    if (!cookieTerpakai.has(id)) {
-        cookieTerpakai.add(id);
-        await redis.sadd('chatgpt_cookie_putaran', id).catch(() => {});
-        console.log(`[COOKIE] putaran selesai ${id}`);
-    }
-    await geserKursor();
-}
-
 async function commitSesiIndex(index) {
     const n = parseInt(index, 10);
     if (!Number.isFinite(n) || n < 1) return;
-    await tandaiCookieTerpakai(cookieKeyOf(n));
+    await markCookieSpent(cookieKeyOf(n));
 }
 
 /** Alias jalur tugas / QC = consume. */
@@ -409,7 +399,7 @@ app.get('/api/health', async (req, res) => {
             status: 'ok',
             proxyMode: mode || proxyMode,
             proxyIp: ip || null,
-            poolSize: 6,
+            poolSize: parseInt(process.env.POOL_SIZE || '3', 10),
             activeWorkers: jumlahTugasAktif,
         });
     } catch (e) {
@@ -420,7 +410,7 @@ app.get('/api/health', async (req, res) => {
 app.post('/api/generate', async (req, res) => {
     if (isRetiring) return res.status(503).json({ error: "Sistem estafet aktif. Silakan request ulang." });
 
-    const MAX_CONCURRENT = 6;
+    const MAX_CONCURRENT = parseInt(process.env.MAX_CONCURRENT_TASKS || '3', 10);
     if (jumlahTugasAktif >= MAX_CONCURRENT) {
         return res.status(429).json({
             status: 'failed',
@@ -525,9 +515,11 @@ app.post('/api/generate', async (req, res) => {
 
         if (context) await context.close().catch(() => {});
         if (browser) await browser.close().catch(() => {});
-        // Kunci cookie ini dulu, baru lepas sewa. Boot slot berikutnya tidak boleh mengambilnya lagi.
-        if (leasedId) await tandaiCookieTerpakai(leasedId);
-        if (leasedId) releaseCookieLease(leasedId);
+        // Browser tugas sudah tutup. Baru lepas sewa, lalu pool boleh boot cookie lain.
+        if (leasedId) {
+            await markCookieSpent(leasedId);
+            releaseCookieLease(leasedId);
+        }
         if (poolSlot && typeof poolBrowser.releaseSlot === 'function') {
             // Jangan langsung membuka lagi akun yang baru saja dipakai tugas ini.
             poolSlot.failIds = leasedId ? [leasedId] : [];
@@ -618,8 +610,10 @@ async function jalankanDemoAwal(activeUrl) {
         } finally {
             if (context) await context.close().catch(() => {});
             if (browser) await browser.close().catch(() => {});
-            if (sesi && sesi.id) await tandaiCookieTerpakai(sesi.id);
-            if (sesi && sesi.id) releaseCookieLease(sesi.id);
+            if (sesi && sesi.id) {
+                await markCookieSpent(sesi.id);
+                releaseCookieLease(sesi.id);
+            }
         }
     }
 }
@@ -775,26 +769,17 @@ async function jalankanProtokolEstafet() {
 
 app.listen(PORT, async () => {
     console.log(`ðŸš€ API Gateway Camoufox menyala di Port ${PORT}`);
+    await loadSpentCookies();
 
-    for (let coba = 1; coba <= 8; coba++) {
-        try {
-            const rawMyPat = await redis.get('current_active_pat');
-            const myPat = (typeof rawMyPat === 'string' ? rawMyPat : '').trim();
-            if (!myPat) {
-                const first = await redis.lindex('github_pats', 0);
-                if (first) await redis.set('current_active_pat', String(first).trim());
-            }
-            startDeadman(redis);
-            break;
-        } catch (e) {
-            console.error(`[SYSTEM] Redis awal gagal (${coba}/8): ${e.message}`);
-            if (coba === 8) {
-                console.error('[SYSTEM] Gateway tetap hidup tanpa deadman. Cek Upstash.');
-                break;
-            }
-            await new Promise((r) => setTimeout(r, 15000));
-        }
+    const rawMyPat = await redis.get('current_active_pat');
+    const myPat = (typeof rawMyPat === 'string' ? rawMyPat : '').trim();
+
+    if (!myPat) {
+        const first = await redis.lindex('github_pats', 0);
+        if (first) await redis.set('current_active_pat', String(first).trim());
     }
+
+    startDeadman(redis);
 
     console.log(`[SYSTEM] ðŸš‡ Memulai inisiasi Cloudflare Tunnel seketika...`);
     const cloudflaredPath = path.join(__dirname, 'cloudflared');
