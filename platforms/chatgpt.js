@@ -145,20 +145,37 @@ async function deteksiLoginAtauSignup(page) {
     });
 }
 
+function halamanMasihPindah(err) {
+    const m = (err && err.message) ? err.message : String(err || '');
+    return /Execution context was destroyed|most likely because of a navigation|Target closed|Target page, context or browser has been closed/i.test(m);
+}
+
 /**
  * Validasi sesi cookie: BUKAN lewat profil.
- * - Ada Login/Sign up ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬ ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ cookie invalid ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬ ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ throw COOKIE_INVALID
- * - Composer siap / tidak ada auth wall ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬ ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ lanjut
+ * - Ada Login/Sign up → cookie invalid → throw COOKIE_INVALID
+ * - Halaman pindah / reload → masih dimuat, ulang di browser yang sama
+ * - Composer siap / tidak ada auth wall → lanjut
  */
 async function tungguSesiValid(page, timeoutMs = 45000) {
-    console.log('[CHATGPT] ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒâ€šÃ‚Â Cek sesi (login/signup = cookie invalid)...');
+    console.log('[CHATGPT] Cek sesi (login/signup = cookie invalid)...');
     const t0 = Date.now();
     let lastLog = 0;
 
     while (Date.now() - t0 < timeoutMs) {
-        const auth = await deteksiLoginAtauSignup(page);
+        let auth = { hit: false, via: '' };
+        try {
+            auth = await deteksiLoginAtauSignup(page);
+        } catch (e) {
+            if (!halamanMasihPindah(e)) throw e;
+            if (Date.now() - lastLog > 2500) {
+                lastLog = Date.now();
+                console.log(`[CHATGPT] sesi… halaman pindah, tunggu lagi ${Date.now() - t0}ms`);
+            }
+            await page.waitForTimeout(600);
+            continue;
+        }
         if (auth.hit) {
-            console.log(`[CHATGPT] ÃƒÆ’Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒâ€¦Ã¢â‚¬â„¢ Auth wall: ${auth.via}`);
+            console.log(`[CHATGPT] Auth wall: ${auth.via}`);
             throw new Error('COOKIE_INVALID: terdeteksi tombol/halaman Login atau Sign up (' + auth.via + ')');
         }
 
@@ -173,27 +190,36 @@ async function tungguSesiValid(page, timeoutMs = 45000) {
                 document.querySelector('[data-testid="prompt-textarea"]') ||
                 document.querySelector('div.ProseMirror[contenteditable="true"]')
             );
-        }).catch(() => false);
+        }).catch((e) => {
+            if (halamanMasihPindah(e)) return false;
+            return false;
+        });
 
         if (composer) {
-            console.log(`[CHATGPT] ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã¢â‚¬Å“ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ Sesi OK (composer ada, tanpa login wall) ${Date.now() - t0}ms`);
+            console.log(`[CHATGPT] Sesi OK (composer ada, tanpa login wall) ${Date.now() - t0}ms`);
             return;
         }
 
         if (Date.now() - lastLog > 2500) {
             lastLog = Date.now();
-            console.log(`[CHATGPT] sesiÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦ ${Date.now() - t0}ms (tunggu composer / cek auth)`);
+            console.log(`[CHATGPT] sesi… ${Date.now() - t0}ms (tunggu composer / cek auth)`);
         }
         await page.waitForTimeout(400);
     }
 
-    // Timeout: cek auth sekali lagi
-    const auth2 = await deteksiLoginAtauSignup(page);
+    // Timeout: cek auth sekali lagi. Reload bukan cookie mati.
+    let auth2 = { hit: false, via: '' };
+    try {
+        auth2 = await deteksiLoginAtauSignup(page);
+    } catch (e) {
+        if (!halamanMasihPindah(e)) throw e;
+        console.log('[CHATGPT] Timeout cek sesi, halaman masih pindah — lanjut ke composer');
+        return;
+    }
     if (auth2.hit) {
         throw new Error('COOKIE_INVALID: terdeteksi Login/Sign up (' + auth2.via + ')');
     }
-    // Tidak ada auth wall ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â biarkan tungguComposerSiap yang memutuskan
-    console.log('[CHATGPT] ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â¡ ÃƒÆ’Ã‚Â¯Ãƒâ€šÃ‚Â¸Ãƒâ€šÃ‚Â Timeout cek sesi tanpa auth wall ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â lanjut ke composer');
+    console.log('[CHATGPT] Timeout cek sesi tanpa auth wall — lanjut ke composer');
 }
 
 /** Klik nyata di area kosong (pinggir kanan tengah / bawah tengah) untuk menutup NUX/overlay */
