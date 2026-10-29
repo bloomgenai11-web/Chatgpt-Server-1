@@ -234,10 +234,11 @@ function formatCookiePayload(rawData, cookieKey, index) {
 
 /** index -> pemegang ('pool:1' / 'gateway' / 'qc'). Hilang saat proses mati. */
 const cookieReserved = new Map();
-/** Gagal login / gagal step 1-3 di proses ini. Tidak ditulis ke Redis. */
+/** Gagal login di proses ini. Tidak ditulis ke Redis, jadi restart masih boleh mencoba. */
 const cookieLewatSesiIni = new Set();
-/** Selesai tugas tapi nomor sebelumnya belum selesai, jadi index belum boleh naik. */
-const cookieSelesaiTugas = new Set();
+/** Sudah selesai mengerjakan tugas. Tidak boleh diambil lagi, termasuk setelah cadangannya dilepas. */
+const cookieSudahTugas = new Set();
+const USED_KEY = 'chatgpt_cookie_used';
 let cookieChain = Promise.resolve();
 
 function antriCookie(fn) {
@@ -258,14 +259,36 @@ function cookieKeyOf(index) {
 
 function dumpCookie(committed) {
     const cadang = [...cookieReserved.keys()].sort((a, b) => a - b).join(',');
-    const antri = [...cookieSelesaiTugas].sort((a, b) => a - b).join(',');
-    console.log(`[COOKIE] redis=${committed} cadangan=[${cadang || '-'}] menunggu-urutan=[${antri || '-'}]`);
+    const antri = [...cookieSudahTugas].filter((n) => n > committed).sort((a, b) => a - b).join(',');
+    console.log(`[COOKIE] redis=${committed} cadangan=[${cadang || '-'}] sudah-tugas-di-depan=[${antri || '-'}]`);
+}
+
+async function loadUsedCookies() {
+    try {
+        const raw = await redis.get(USED_KEY);
+        const arr = Array.isArray(raw) ? raw : (typeof raw === 'string' && raw.trim() ? JSON.parse(raw) : []);
+        for (const n of arr || []) {
+            const x = parseInt(n, 10);
+            if (Number.isFinite(x) && x > 0) cookieSudahTugas.add(x);
+        }
+        if (cookieSudahTugas.size) console.log(`[COOKIE] sudah-tugas tersimpan ${cookieSudahTugas.size} (tidak dipakai ulang)`);
+    } catch (e) {
+        console.log('[COOKIE] load sudah-tugas gagal: ' + e.message);
+    }
+}
+
+async function persistUsedCookies() {
+    await redis.set(USED_KEY, JSON.stringify([...cookieSudahTugas].sort((a, b) => a - b)));
 }
 
 async function reserveNextCookie(holder) {
     return antriCookie(async () => {
         const committed = await getCommittedIndex();
         for (let index = committed + 1; index <= MAX_COOKIES; index++) {
+            if (cookieSudahTugas.has(index)) {
+                console.log(`[COOKIE] lewati #${index} â€” sudah mengerjakan tugas, tidak dipakai ulang`);
+                continue;
+            }
             if (cookieReserved.has(index) || cookieLewatSesiIni.has(index)) continue;
             const cookieKey = cookieKeyOf(index);
             const rawData = await redis.get(cookieKey);
@@ -308,18 +331,21 @@ async function commitTaskCookie(index) {
     if (!Number.isFinite(n) || n < 1) return;
     return antriCookie(async () => {
         let current = await getCommittedIndex();
-        if (n <= current) return;
-        cookieSelesaiTugas.add(n);
-        let advanced = current;
-        while (cookieSelesaiTugas.has(advanced + 1)) {
-            advanced += 1;
-            cookieSelesaiTugas.delete(advanced);
+        if (!cookieSudahTugas.has(n)) {
+            cookieSudahTugas.add(n);
+            try { await persistUsedCookies(); } catch (e) { console.log('[COOKIE] simpan sudah-tugas gagal: ' + e.message); }
         }
+        if (n <= current) {
+            dumpCookie(current);
+            return;
+        }
+        let advanced = current;
+        while (cookieSudahTugas.has(advanced + 1)) advanced += 1;
         if (advanced !== current) {
             await redis.set('global_chatgpt_index', advanced);
             console.log(`[COOKIE] index ${current} â†’ ${advanced} (cookie ini selesai tugas, urut)`);
         } else {
-            console.log(`[COOKIE] tugas #${n} selesai, index tetap ${current} (nomor sebelumnya belum selesai)`);
+            console.log(`[COOKIE] tugas #${n} selesai, index tetap ${current} (nomor sebelumnya belum selesai, #${n} tidak di-roll)`);
         }
         dumpCookie(advanced);
     });
@@ -738,6 +764,7 @@ async function jalankanProtokolEstafet() {
 
 app.listen(PORT, async () => {
     console.log(`ðŸš€ API Gateway Camoufox menyala di Port ${PORT}`);
+    await loadUsedCookies();
 
     const rawMyPat = await redis.get('current_active_pat');
     const myPat = (typeof rawMyPat === 'string' ? rawMyPat : '').trim();
