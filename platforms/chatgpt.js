@@ -1308,22 +1308,23 @@ async function persiapkanHalaman(page, folderHasil, options = {}) {
         cookieId: (options && options.cookieId) || '',
         poolSlot: options && options.poolSlot != null ? String(options.poolSlot) : '',
     };
+    const skipShots = !!(options && options.skipShots);
     return _als.run(ctx, async () => {
         setChatgptLogCtx(ctx);
-        console.log('\n[CHATGPT] Pool step 1-3 (goto, sesi, composer, Start Voice)...');
+        console.log('\n[CHATGPT] Cek sehat (goto, sesi, composer, Start Voice)...');
         await page.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded', timeout: 90000 }).catch(() => {});
         await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
-        await stepShot(page, folderHasil, '01_after_goto');
+        if (!skipShots) await stepShot(page, folderHasil, '01_after_goto');
         await klikAreaKosong(page);
         await tungguSesiValid(page, 45000);
-        await stepShot(page, folderHasil, '02_after_session');
+        if (!skipShots) await stepShot(page, folderHasil, '02_after_session');
         await klikAreaKosong(page);
         await tungguComposerSiap(page, 60000);
-        await stepShot(page, folderHasil, '03_composer_ready');
+        if (!skipShots) await stepShot(page, folderHasil, '03_composer_ready');
         await klikAreaKosong(page);
         await tungguStartVoice(page, 45000);
-        await stepShot(page, folderHasil, '03b_start_voice_ready');
-        console.log('[CHATGPT] Pool berhenti di Start Voice â€” browser tetap hidup, menunggu tugas');
+        if (!skipShots) await stepShot(page, folderHasil, '03b_start_voice_ready');
+        console.log('[CHATGPT] Cookie sehat â€” Start Voice ada');
     });
 }
 
