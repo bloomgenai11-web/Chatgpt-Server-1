@@ -748,10 +748,8 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
             await klikAreaKosong(page);
             await page.waitForTimeout(400);
         } else {
-            // Pool: page sudah HOLD. Jangan goto / jangan New chat.
-            console.log(`\n[CHATGPT] ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â¡Ãƒâ€šÃ‚Â¡ Lanjut di page pool (tanpa goto)...`);
-            await tungguComposerSiap(page, 15000).catch(() => {});
-            await page.waitForTimeout(300);
+            console.log(`\n[CHATGPT] Lanjut di page pool (step 1-3 sudah selesai, tanpa goto)...`);
+            if (!options.siapVoice) await tungguComposerSiap(page, 15000).catch(() => {});
         }
 
         let copyAwal = 0;
@@ -768,9 +766,11 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
 
         // Upaya pertama: composer kosong, tunggu Start Voice.
         // Upaya ulang: draft masih di kolom, tombolnya Kirim/Send â€” jangan tunggu suara 45 detik.
-        if (upayaKirim === 1) {
+        if (upayaKirim === 1 && !(existingPage && options.siapVoice)) {
             await tungguStartVoice(page, 45000);
             await stepShot(page, folderHasil, '03b_start_voice_ready');
+        } else if (upayaKirim === 1 && options.siapVoice) {
+            console.log('[CHATGPT] Start Voice sudah dicek pool â€” lanjut upload / prompt / kirim');
         } else {
             console.log('[CHATGPT] Upaya ulang: lewati tunggu Start Voice (draft membuat tombol tetap Kirim/Send)');
             await tutupDialogPengganggu(page);
@@ -1303,4 +1303,28 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
     }
 }
 
-module.exports = { eksekusiChatGPT, setChatgptLogCtx };
+async function persiapkanHalaman(page, folderHasil, options = {}) {
+    const ctx = {
+        cookieId: (options && options.cookieId) || '',
+        poolSlot: options && options.poolSlot != null ? String(options.poolSlot) : '',
+    };
+    return _als.run(ctx, async () => {
+        setChatgptLogCtx(ctx);
+        console.log('\n[CHATGPT] Pool step 1-3 (goto, sesi, composer, Start Voice)...');
+        await page.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded', timeout: 90000 }).catch(() => {});
+        await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+        await stepShot(page, folderHasil, '01_after_goto');
+        await klikAreaKosong(page);
+        await tungguSesiValid(page, 45000);
+        await stepShot(page, folderHasil, '02_after_session');
+        await klikAreaKosong(page);
+        await tungguComposerSiap(page, 60000);
+        await stepShot(page, folderHasil, '03_composer_ready');
+        await klikAreaKosong(page);
+        await tungguStartVoice(page, 45000);
+        await stepShot(page, folderHasil, '03b_start_voice_ready');
+        console.log('[CHATGPT] Pool berhenti di Start Voice â€” browser tetap hidup, menunggu tugas');
+    });
+}
+
+module.exports = { eksekusiChatGPT, setChatgptLogCtx, persiapkanHalaman };
