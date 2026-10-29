@@ -8,6 +8,7 @@ const path = require('path');
 
 const TARGET = 10;
 const MIN_BEFORE_WORK = 5;
+const PAUSE_AT = 3;
 const WAIT_MS = 20 * 60 * 1000;
 
 let deps = {};
@@ -20,6 +21,7 @@ let scanExhausted = false;
 let gateOpen = false;
 let bootIndex = 0;
 let taking = false;
+let cekTerbuka = false;
 
 function setDeps(d) { deps = d || {}; }
 
@@ -90,28 +92,44 @@ async function checkOnce(item) {
   }
 }
 
+function aktif() {
+  return typeof deps.getActive === 'function' ? deps.getActive() : 0;
+}
+
 async function cookieSehat(index) {
   const raw = await deps.redis.get(`cookie_chatgpt_${index}`);
   const item = formatCookie(raw, index);
   if (!item) {
-    console.log(`[CEK] #${index} tidak ada data â€” lewati`);
+    console.log(`[CEK] #${index} tidak ada data — lewati`);
     return null;
   }
   let last = null;
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    while (typeof deps.getActive === 'function' && deps.getActive() >= 5) {
+  let attempt = 1;
+  let tungguLog = 0;
+  while (attempt <= 2) {
+    while (aktif() >= PAUSE_AT) {
+      const now = Date.now();
+      if (now - tungguLog > 8000) {
+        tungguLog = now;
+        console.log(`[CEK] ${aktif()} tugas sedang jalan — pemeriksaan cookie ditunda`);
+      }
       await sleep(500);
     }
+    cekTerbuka = true;
     try {
+      if (aktif() >= PAUSE_AT) continue;
       console.log(`[CEK] cek #${index} percobaan ${attempt}/2`);
       await checkOnce(item);
       console.log(`[CEK] #${index} SEHAT`);
       return item;
     } catch (e) {
       last = e;
+      attempt += 1;
       const invalid = /COOKIE_INVALID/.test(e.message || '');
       console.log(`[CEK] #${index} gagal: ${e.message}`);
       if (invalid) break;
+    } finally {
+      cekTerbuka = false;
     }
   }
   console.log(`[CEK] #${index} tidak masuk daftar (${last ? last.message : 'gagal'})`);
@@ -175,8 +193,8 @@ async function takeNext() {
     if (healthy.length >= MIN_BEFORE_WORK) gateOpen = true;
     if (scanExhausted && healthy.length > 0) gateOpen = true;
 
-    const active = typeof deps.getActive === 'function' ? deps.getActive() : 0;
-    if (!taking && gateOpen && healthy.length > 0 && active < 5) {
+    const active = aktif();
+    if (!taking && gateOpen && healthy.length > 0 && active < 5 && !cekTerbuka) {
       taking = true;
       const item = healthy.shift();
       try {
@@ -201,8 +219,9 @@ async function takeNext() {
     if (now - lastLog > 8000) {
       lastLog = now;
       if (!gateOpen) console.log(`[CEK] gateway menunggu daftar awal ${healthy.length}/${MIN_BEFORE_WORK} (antre, tidak ditolak)`);
-      else if (active >= 5) console.log(`[CEK] 5 tugas sedang jalan â€” permintaan ini menunggu slot`);
-      else console.log(`[CEK] daftar kosong â€” menunggu pemeriksaan cookie berikutnya`);
+      else if (active >= 5) console.log(`[CEK] 5 tugas sedang jalan — permintaan ini menunggu slot`);
+      else if (cekTerbuka) console.log(`[CEK] pemeriksaan cookie sedang jalan — permintaan menunggu browser itu selesai`);
+      else console.log(`[CEK] daftar kosong — menunggu pemeriksaan cookie berikutnya`);
     }
     poke();
     await sleep(400);
