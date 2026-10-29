@@ -1,356 +1,218 @@
 /**
- * 5 browser Camoufox hidup terus.
- * Boot hanya sampai Start Voice, lalu menunggu tugas.
- * Tugas lanjut di page yang sama (tanpa step 1-3, tanpa browser baru).
- * Refresh 5 menit: page.reload/goto, browser dan fingerprint tetap.
- * Cookie baru hanya setelah cookie yang sedang dipegang selesai dipakai tugas,
- * dan hanya kalau tidak ada slot lain yang cookienya belum pernah mengerjakan tugas.
+ * Pemeriksa cookie. Bukan pool browser.
+ * Tidak ada browser standby. Satu per satu: buka, cek sehat, tutup.
+ * Daftar sehat maksimal 10, urut dari kecil ke besar, hanya di memori.
+ * Redis index dibaca sekali saat mulai. Tidak ditulis oleh pemeriksa.
  */
-const POOL_SIZE = 5;
-const REFRESH_MS = 5 * 60 * 1000;
+const path = require('path');
+
+const TARGET = 10;
+const MIN_BEFORE_WORK = 5;
+const WAIT_MS = 20 * 60 * 1000;
 
 let deps = {};
-let slots = [];
+let folder = null;
+let healthy = [];
+let nextScan = 1;
+let scanning = false;
 let started = false;
-let poolFolder = null;
-let heavyChain = Promise.resolve();
+let scanExhausted = false;
+let gateOpen = false;
+let bootIndex = 0;
+let taking = false;
 
-function setDeps(d) {
-  deps = { ...deps, ...d };
+function setDeps(d) { deps = d || {}; }
+
+function listText() {
+  return healthy.map((x) => x.index).join(', ') || '-';
 }
 
-function poolLog(slot, msg) {
-  const id = slot && slot.id != null ? slot.id : '?';
-  console.log(`[POOL_${id}] ${msg}`);
+function logList(why) {
+  console.log(`[CEK] ${why} | sehat ${healthy.length}/${TARGET}: ${listText()} | berikutnya=#${nextScan}`);
 }
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
+function snapshot() {
+  return {
+    bootIndex,
+    nextScan,
+    gateOpen,
+    target: TARGET,
+    minBeforeWork: MIN_BEFORE_WORK,
+    list: healthy.map((x) => x.index),
+  };
 }
 
-function heavy(fn) {
-  const run = heavyChain.then(() => fn(), () => fn());
-  heavyChain = run.then(() => {}, () => {});
-  return run;
+function formatCookie(rawData, index) {
+  let data = rawData;
+  if (typeof data === 'string') {
+    try { data = JSON.parse(data); } catch (e) { data = null; }
+  }
+  if (!data || typeof data !== 'object') return null;
+  const cookies = Object.entries(data).map(([key, value]) => ({
+    name: key,
+    value: String(value),
+    domain: '.chatgpt.com',
+    path: '/',
+    secure: true,
+    sameSite: 'Lax',
+  }));
+  if (!cookies.length) return null;
+  return { id: `cookie_chatgpt_${index}`, index, cookies };
 }
 
-function pageAlive(slot) {
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+async function checkOnce(item) {
+  let browser = null;
+  let context = null;
+  let page = null;
   try {
-    if (!slot || !slot.page || !slot.context || !slot.browser) return false;
-    if (typeof slot.page.isClosed === 'function' && slot.page.isClosed()) return false;
-    return true;
-  } catch (_) {
-    return false;
-  }
-}
-
-async function installPopupKiller(page) {
-  await page.addInitScript(() => {
-    const dismissPopups = () => {
-      const btns = document.querySelectorAll('button');
-      for (const btn of btns) {
-        const txt = (btn.textContent || '').trim().toLowerCase();
-        if (txt === 'got it' || txt === 'okay' || txt === 'ok' || txt === 'stay logged out' || txt === 'continue') {
-          try { btn.click(); } catch (e) {}
-        }
-      }
-    };
-    if (!window.__poolPopupKillerInstalled) {
-      window.__poolPopupKillerInstalled = true;
-      const observer = new MutationObserver(() => dismissPopups());
-      observer.observe(document.documentElement, { childList: true, subtree: true });
-      setInterval(dismissPopups, 800);
-    }
-    dismissPopups();
-  }).catch(() => {});
-}
-
-async function closeQuiet(slot) {
-  const page = slot.page;
-  const context = slot.context;
-  const browser = slot.browser;
-  slot.page = null;
-  slot.context = null;
-  slot.browser = null;
-  try { if (page) await page.close().catch(() => {}); } catch (_) {}
-  try { if (context) await context.close().catch(() => {}); } catch (_) {}
-  try { if (browser) await browser.close().catch(() => {}); } catch (_) {}
-}
-
-async function pasangSampaiSiap(slot) {
-  if (!deps.reserveCookie) throw new Error('reserveCookie belum di-set');
-  if (!deps.chatgptModule || typeof deps.chatgptModule.persiapkanHalaman !== 'function') {
-    throw new Error('chatgpt.persiapkanHalaman belum ada');
-  }
-  let lastErr = null;
-  let navRetry = 0;
-  for (let attempt = 1; attempt <= 8; attempt++) {
-    const sesi = navRetry && slot.cookies && slot.cookieIndex
-      ? { index: slot.cookieIndex, id: slot.cookieId, cookies: slot.cookies }
-      : await deps.reserveCookie('pool:' + slot.id);
-    slot.cookieIndex = sesi.index;
-    slot.cookieId = sesi.id;
-    slot.cookies = sesi.cookies;
-    slot.usedForTask = false;
-    try {
-      if (!navRetry) {
-        await slot.context.clearCookies().catch(() => {});
-        await slot.context.addCookies(sesi.cookies);
-      }
-      poolLog(slot, `step 1-3 cookie=${sesi.id} (index Redis tidak ditulis)`);
-      await heavy(() => deps.chatgptModule.persiapkanHalaman(slot.page, poolFolder, {
-        cookieId: sesi.id,
-        poolSlot: slot.id,
-      }));
-      return;
-    } catch (e) {
-      lastErr = e;
-      const nav = /Execution context was destroyed|Target closed|navigation/i.test(e.message || '');
-      const invalid = /COOKIE_INVALID/.test(e.message || '');
-      if (nav && navRetry < 2) {
-        navRetry += 1;
-        poolLog(slot, `${sesi.id} halaman masih pindah â€” ulang step 1-3 cookie yang sama (${navRetry}/2), bukan cookie baru`);
-        continue;
-      }
-      navRetry = 0;
-      if (invalid) {
-        poolLog(slot, `${sesi.id} login/signup â€” buang dari sesi ini, index Redis tidak maju`);
-        if (deps.markCookieInvalid) await deps.markCookieInvalid(sesi.index);
-        else if (deps.releaseReservation) await deps.releaseReservation(sesi.index);
-      } else {
-        poolLog(slot, `${sesi.id} gagal disiapkan (${e.message}) â€” lepas cadangan, index Redis tidak maju`);
-        if (deps.releaseReservation) await deps.releaseReservation(sesi.index);
-      }
-      slot.cookieIndex = null;
-      slot.cookieId = null;
-      slot.cookies = null;
-    }
-  }
-  throw lastErr || new Error('gagal memasang cookie pool');
-}
-
-async function bootSlot(slot) {
-  slot.state = 'booting';
-  slot.usedForTask = false;
-  poolLog(slot, 'meluncurkan browser (fingerprint slot ini, sekali)');
-  try {
-    if (slot.browser) await closeQuiet(slot);
-    if (!deps.launchGatewayBrowser) throw new Error('launchGatewayBrowser belum di-set');
     const launched = await deps.launchGatewayBrowser();
-    slot.browser = launched.browser;
-    slot.label = launched.label;
-    slot.context = await slot.browser.newContext({ acceptDownloads: true });
-    slot.page = await slot.context.newPage();
-    await installPopupKiller(slot.page);
-    await pasangSampaiSiap(slot);
-    slot.state = 'ready';
-    slot.readyAt = Date.now();
-    slot.usedForTask = false;
-    poolLog(slot, `HIDUP cookie=${slot.cookieId} net=${slot.label} â€” menunggu tugas, browser tidak ditutup`);
+    browser = launched.browser;
+    context = await browser.newContext({ acceptDownloads: true });
+    await context.addCookies(item.cookies);
+    page = await context.newPage();
+    await deps.chatgptModule.persiapkanHalaman(page, folder, {
+      cookieId: item.id,
+      skipShots: true,
+    });
+    return true;
   } catch (e) {
-    poolLog(slot, 'boot gagal: ' + e.message);
-    await closeQuiet(slot);
-    slot.state = 'dead';
-    await sleep(/tidak ada cookie/.test(e.message || '') ? 30000 : 5000);
-    return bootSlot(slot);
+    if (page) {
+      const shot = path.join(folder, `cek_fail_${item.index}_${Date.now()}.png`);
+      await page.screenshot({ path: shot, fullPage: true }).catch(() => {});
+    }
+    throw e;
+  } finally {
+    if (page) await page.close().catch(() => {});
+    if (context) await context.close().catch(() => {});
+    if (browser) await browser.close().catch(() => {});
   }
 }
 
-async function rotateClaimed(slot) {
-  const oldId = slot.cookieId;
-  const oldIndex = slot.cookieIndex;
-  poolLog(slot, `cookie ${oldId || '-'} sudah dipakai tugas â€” ganti cookie, browser tetap`);
-  if (oldIndex && deps.releaseReservation) await deps.releaseReservation(oldIndex);
-  slot.cookieIndex = null;
-  slot.cookieId = null;
-  slot.cookies = null;
-  slot.usedForTask = false;
-  try {
-    if (!pageAlive(slot)) {
-      slot.state = 'booting';
-      await bootSlot(slot);
-      return;
-    }
-    await pasangSampaiSiap(slot);
-    slot.state = 'ready';
-    slot.readyAt = Date.now();
-    slot.usedForTask = false;
-    poolLog(slot, `siap cookie=${slot.cookieId} â€” browser dan fingerprint tetap`);
-  } catch (e) {
-    poolLog(slot, 'ganti cookie gagal: ' + e.message);
-    slot.state = 'dead';
-    await closeQuiet(slot);
-    await sleep(3000);
-    return bootSlot(slot);
+async function cookieSehat(index) {
+  const raw = await deps.redis.get(`cookie_chatgpt_${index}`);
+  const item = formatCookie(raw, index);
+  if (!item) {
+    console.log(`[CEK] #${index} tidak ada data â€” lewati`);
+    return null;
   }
-}
-
-async function refreshSlot(slot) {
-  slot.state = 'refreshing';
-  poolLog(slot, `refresh 5 menit cookie=${slot.cookieId} â€” browser dan fingerprint sama`);
-  try {
-    await heavy(() => deps.chatgptModule.persiapkanHalaman(slot.page, poolFolder, {
-      cookieId: slot.cookieId,
-      poolSlot: slot.id,
-    }));
-    if (slot.state === 'refreshing') {
-      slot.state = 'ready';
-      slot.readyAt = Date.now();
-      poolLog(slot, 'refresh selesai, menunggu tugas');
+  let last = null;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    while (typeof deps.getActive === 'function' && deps.getActive() >= 5) {
+      await sleep(500);
     }
-  } catch (e) {
-    poolLog(slot, 'refresh gagal: ' + e.message);
-    if (/COOKIE_INVALID/.test(e.message || '')) {
-      if (deps.markCookieInvalid && slot.cookieIndex) await deps.markCookieInvalid(slot.cookieIndex);
-      slot.state = 'rotating';
-      await rotateClaimed(slot);
-      return;
-    }
-    if (slot.state === 'refreshing') {
-      if (pageAlive(slot)) {
-        slot.state = 'ready';
-      } else {
-        slot.state = 'dead';
-        bootSlot(slot).catch((err) => poolLog(slot, 'relaunch: ' + err.message));
-      }
+    try {
+      console.log(`[CEK] cek #${index} percobaan ${attempt}/2`);
+      await checkOnce(item);
+      console.log(`[CEK] #${index} SEHAT`);
+      return item;
+    } catch (e) {
+      last = e;
+      const invalid = /COOKIE_INVALID/.test(e.message || '');
+      console.log(`[CEK] #${index} gagal: ${e.message}`);
+      if (invalid) break;
     }
   }
-}
-
-function tickRefresh() {
-  for (const slot of slots) {
-    if (slot.state !== 'ready') continue;
-    if (!slot.readyAt || Date.now() - slot.readyAt < REFRESH_MS) continue;
-    refreshSlot(slot).catch((e) => poolLog(slot, 'refresh error: ' + e.message));
-    break;
-  }
-}
-
-async function takeSlot() {
-  if (!started || !slots.length) return null;
-  const deadline = Date.now() + 600000;
-  while (Date.now() < deadline) {
-    const busy = slots.filter((s) => s.state === 'busy').length;
-    if (busy >= slots.length) return null;
-
-    const fresh = slots
-      .filter((s) => s.state === 'ready' && !s.usedForTask && pageAlive(s))
-      .sort((a, b) => (a.cookieIndex || 0) - (b.cookieIndex || 0));
-    if (fresh[0]) {
-      fresh[0].state = 'busy';
-      poolLog(fresh[0], `tugas masuk cookie=${fresh[0].cookieId} â€” lanjut tanpa step 1-3`);
-      return fresh[0];
-    }
-
-    const pending = slots.some((s) => s.state === 'booting' || s.state === 'refreshing' || s.state === 'rotating' || s.state === 'dead');
-    if (pending) {
-      await sleep(300);
-      continue;
-    }
-
-    const spent = slots
-      .filter((s) => s.state === 'ready' && s.usedForTask && pageAlive(s))
-      .sort((a, b) => (a.cookieIndex || 0) - (b.cookieIndex || 0));
-    if (spent[0]) {
-      spent[0].state = 'rotating';
-      await rotateClaimed(spent[0]);
-      continue;
-    }
-
-    await sleep(300);
-  }
+  console.log(`[CEK] #${index} tidak masuk daftar (${last ? last.message : 'gagal'})`);
   return null;
 }
 
-async function runTaskOnSlot(slot, args) {
-  if (!slot || !slot.page) throw new Error('slot pool tidak punya page');
+function poke() {
+  if (scanning || scanExhausted) return;
+  if (healthy.length >= TARGET) return;
+  scanning = true;
+  scanLoop().catch((e) => {
+    console.error('[CEK] scan berhenti:', e.message);
+    scanning = false;
+  });
+}
+
+async function scanLoop() {
   try {
-    const hasil = await deps.chatgptModule.eksekusiChatGPT(
-      args.action || 'CHAT',
-      args.prompt || '',
-      !!args.isThinkingMode,
-      args.translatedFiles || [],
-      args.folderHasil || poolFolder,
-      slot.context,
-      {
-        page: slot.page,
-        holdPage: true,
-        siapVoice: true,
-        cookieId: slot.cookieId,
-        poolSlot: slot.id,
-      }
-    );
-    slot.usedForTask = true;
-    slot.state = 'ready';
-    slot.readyAt = Date.now();
-    poolLog(slot, `tugas selesai. Browser tetap hidup. Cookie ${slot.cookieId} tidak langsung diganti.`);
-    return hasil;
-  } catch (e) {
-    slot.usedForTask = true;
-    if (/COOKIE_INVALID/.test(e.message || '')) {
-      slot.state = 'rotating';
-      rotateClaimed(slot).catch((err) => poolLog(slot, 'rotate: ' + err.message));
-    } else if (!pageAlive(slot)) {
-      slot.state = 'dead';
-      bootSlot(slot).catch((err) => poolLog(slot, 'relaunch: ' + err.message));
-    } else {
-      slot.state = 'ready';
-      slot.readyAt = Date.now();
+    const max = deps.MAX_COOKIES || 300;
+    while (healthy.length < TARGET && nextScan <= max) {
+      const index = nextScan;
+      nextScan += 1;
+      const item = await cookieSehat(index);
+      if (!item) continue;
+      healthy.push(item);
+      if (healthy.length >= MIN_BEFORE_WORK) gateOpen = true;
+      logList(`tambah #${item.index}`);
     }
-    throw e;
+    if (nextScan > max) {
+      scanExhausted = true;
+      if (healthy.length > 0) gateOpen = true;
+      console.log(`[CEK] pemeriksaan sampai #${max} selesai. Sehat: ${listText()}`);
+    }
+  } finally {
+    scanning = false;
+    if (healthy.length < TARGET && !scanExhausted) poke();
   }
 }
 
-async function startPool(folderHasil) {
-  if (started) {
-    console.log('[POOL] sudah hidup, skip');
-    return;
-  }
+async function start(folderHasil) {
+  if (started) return;
   started = true;
-  poolFolder = folderHasil || null;
-  slots = [];
-  console.log('[POOL] start 5 browser HIDUP. Pool tidak menulis index Redis. Refresh tiap 5 menit, fingerprint tetap.');
-  for (let i = 1; i <= POOL_SIZE; i++) {
-    slots.push({
-      id: i,
-      state: 'dead',
-      browser: null,
-      context: null,
-      page: null,
-      cookieId: null,
-      cookieIndex: null,
-      cookies: null,
-      usedForTask: false,
-      readyAt: 0,
-      label: '',
-    });
-  }
-  for (const slot of slots) {
-    await bootSlot(slot);
-  }
-  console.log('[POOL] 5 browser menunggu tugas:', poolStats());
-  setInterval(tickRefresh, 20000);
+  folder = folderHasil;
+  const raw = await deps.redis.get('global_chatgpt_index');
+  const n = parseInt(raw, 10);
+  bootIndex = Number.isFinite(n) && n > 0 ? n : 0;
+  nextScan = bootIndex + 1;
+  console.log(`[CEK] redis index=${bootIndex} dibaca sekali. Cek satu per satu mulai #${nextScan}. Target ${TARGET} sehat, gateway menunggu minimal ${MIN_BEFORE_WORK}. Browser langsung ditutup.`);
+  poke();
 }
 
-function poolStats() {
-  const c = { ready: 0, busy: 0, booting: 0, refreshing: 0, rotating: 0, dead: 0 };
-  for (const s of slots) {
-    if (c[s.state] === undefined) c[s.state] = 0;
-    c[s.state] += 1;
+/**
+ * Ambil cookie paling kecil di daftar.
+ * Menunggu kalau daftar belum 5 (mesin baru) atau sedang kosong atau 5 tugas sedang jalan.
+ * Tidak menolak. Index Redis ditulis lewat deps.commitIndex sebelum browser tugas dibuka.
+ */
+async function takeNext() {
+  const startedAt = Date.now();
+  let lastLog = 0;
+  while (Date.now() - startedAt < WAIT_MS) {
+    if (healthy.length >= MIN_BEFORE_WORK) gateOpen = true;
+    if (scanExhausted && healthy.length > 0) gateOpen = true;
+
+    const active = typeof deps.getActive === 'function' ? deps.getActive() : 0;
+    if (!taking && gateOpen && healthy.length > 0 && active < 5) {
+      taking = true;
+      const item = healthy.shift();
+      try {
+        if (deps.commitIndex) await deps.commitIndex(item.index);
+        if (deps.reserveWorker) deps.reserveWorker();
+      } catch (e) {
+        healthy.unshift(item);
+        taking = false;
+        throw e;
+      }
+      taking = false;
+      logList(`pakai #${item.index} untuk tugas`);
+      poke();
+      return item;
+    }
+
+    if (scanExhausted && healthy.length === 0) {
+      throw new Error('[CEK] tidak ada cookie sehat tersisa');
+    }
+
+    const now = Date.now();
+    if (now - lastLog > 8000) {
+      lastLog = now;
+      if (!gateOpen) console.log(`[CEK] gateway menunggu daftar awal ${healthy.length}/${MIN_BEFORE_WORK} (antre, tidak ditolak)`);
+      else if (active >= 5) console.log(`[CEK] 5 tugas sedang jalan â€” permintaan ini menunggu slot`);
+      else console.log(`[CEK] daftar kosong â€” menunggu pemeriksaan cookie berikutnya`);
+    }
+    poke();
+    await sleep(400);
   }
-  return c;
+  throw new Error('[CEK] menunggu cookie sehat lebih dari 20 menit');
 }
 
-function isPoolReady() {
-  return started && slots.some((s) => s.state === 'ready' && pageAlive(s));
+function releaseWorker() {
+  if (deps.releaseWorker) deps.releaseWorker();
+  poke();
 }
 
-module.exports = {
-  setDeps,
-  startPool,
-  takeSlot,
-  runTaskOnSlot,
-  poolStats,
-  isPoolReady,
-  POOL_SIZE,
-};
+module.exports = { setDeps, start, takeNext, releaseWorker, snapshot };
