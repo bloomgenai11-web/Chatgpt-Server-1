@@ -248,6 +248,7 @@ function pasangPemeriksa() {
         MAX_COOKIES,
         getActive: () => jumlahTugasAktif,
         reserveWorker,
+        releaseWorker,
         commitIndex: catatIndexDipakai,
     });
 }
