@@ -83,15 +83,20 @@ async function pasangSampaiSiap(slot) {
     throw new Error('chatgpt.persiapkanHalaman belum ada');
   }
   let lastErr = null;
+  let navRetry = 0;
   for (let attempt = 1; attempt <= 8; attempt++) {
-    const sesi = await deps.reserveCookie('pool:' + slot.id);
+    const sesi = navRetry && slot.cookies && slot.cookieIndex
+      ? { index: slot.cookieIndex, id: slot.cookieId, cookies: slot.cookies }
+      : await deps.reserveCookie('pool:' + slot.id);
     slot.cookieIndex = sesi.index;
     slot.cookieId = sesi.id;
     slot.cookies = sesi.cookies;
     slot.usedForTask = false;
     try {
-      await slot.context.clearCookies().catch(() => {});
-      await slot.context.addCookies(sesi.cookies);
+      if (!navRetry) {
+        await slot.context.clearCookies().catch(() => {});
+        await slot.context.addCookies(sesi.cookies);
+      }
       poolLog(slot, `step 1-3 cookie=${sesi.id} (index Redis tidak ditulis)`);
       await heavy(() => deps.chatgptModule.persiapkanHalaman(slot.page, poolFolder, {
         cookieId: sesi.id,
@@ -100,9 +105,22 @@ async function pasangSampaiSiap(slot) {
       return;
     } catch (e) {
       lastErr = e;
-      poolLog(slot, `${sesi.id} gagal disiapkan (${e.message}) â€” buang dari sesi ini, index Redis tidak maju`);
-      if (deps.markCookieInvalid) await deps.markCookieInvalid(sesi.index);
-      else if (deps.releaseReservation) await deps.releaseReservation(sesi.index);
+      const nav = /Execution context was destroyed|Target closed|navigation/i.test(e.message || '');
+      const invalid = /COOKIE_INVALID/.test(e.message || '');
+      if (nav && navRetry < 2) {
+        navRetry += 1;
+        poolLog(slot, `${sesi.id} halaman masih pindah â€” ulang step 1-3 cookie yang sama (${navRetry}/2), bukan cookie baru`);
+        continue;
+      }
+      navRetry = 0;
+      if (invalid) {
+        poolLog(slot, `${sesi.id} login/signup â€” buang dari sesi ini, index Redis tidak maju`);
+        if (deps.markCookieInvalid) await deps.markCookieInvalid(sesi.index);
+        else if (deps.releaseReservation) await deps.releaseReservation(sesi.index);
+      } else {
+        poolLog(slot, `${sesi.id} gagal disiapkan (${e.message}) â€” lepas cadangan, index Redis tidak maju`);
+        if (deps.releaseReservation) await deps.releaseReservation(sesi.index);
+      }
       slot.cookieIndex = null;
       slot.cookieId = null;
       slot.cookies = null;
