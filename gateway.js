@@ -75,7 +75,13 @@ app.use('/files', express.static(folderHasil));
 // none   = direct Codespace (fallback jika cheap mati / tidak dikonfigurasi)
 // Launch: opsi proxy Playwright. Logika lain (cookie, pool, QC, estafet) tidak diubah.
 // =====================================================================
+// Uji sekarang: proxy dimatikan. Browser memakai internet Codespace.
+// geoip=true tanpa proxy = timezone/locale mengikuti IP mesin, bukan IP Cheap Proxy.
+// Kembalikan proxy: FORCE_DIRECT=0 lalu restart.
+const PAKSA_TANPA_PROXY = String(process.env.FORCE_DIRECT ?? '1') !== '0';
+
 function initialProxyMode() {
+    if (PAKSA_TANPA_PROXY) return 'none';
     if (CHEAP_PROXY_HOST && CHEAP_PROXY_PORT) return 'cheap';
     return 'none';
 }
@@ -98,6 +104,10 @@ function setMode(mode, ip, logLine) {
 }
 
 function monitorProxy() {
+    if (PAKSA_TANPA_PROXY) {
+        setMode('none', null, `\n[NETWORK] Proxy dimatikan. Internet Codespace, geoip mengikuti IP mesin.`);
+        return;
+    }
     if (!CHEAP_PROXY_HOST || !CHEAP_PROXY_PORT) {
         setMode('none', null, `\n[NETWORK] Cheap Proxy tidak ada â†’ internet Codespace (tanpa proxy).`);
         return;
@@ -177,7 +187,7 @@ async function launchGatewayBrowser() {
     };
 
     // ChatGPT 2 jalur: Cheap Proxy, atau internet Codespace jika cheap bermasalah.
-    if (proxyMode === 'cheap' && CHEAP_PROXY_HOST && CHEAP_PROXY_PORT) {
+    if (!PAKSA_TANPA_PROXY && proxyMode === 'cheap' && CHEAP_PROXY_HOST && CHEAP_PROXY_PORT) {
         camoufoxOpts.geoip = true;
         camoufoxOpts.proxy = {
             server: `http://${CHEAP_PROXY_HOST}:${CHEAP_PROXY_PORT}`,
@@ -188,7 +198,7 @@ async function launchGatewayBrowser() {
         gunakanProxy = true;
     } else {
         prefs['network.proxy.type'] = 0;
-        camoufoxOpts.geoip = false;
+        camoufoxOpts.geoip = true;
         camoufoxOpts.firefoxUserPrefs = prefs;
         label = 'Codespace';
         gunakanProxy = false;
