@@ -648,6 +648,53 @@ async function kirimTerkonfirmasi(page, promptTeks) {
     return false;
 }
 
+let nomorLaporanKirim = 0;
+
+async function tekanEnterComposer(page) {
+    const pos = await page.evaluate(() => {
+        const terlihat = (el) => {
+            if (!el) return false;
+            const r = el.getBoundingClientRect();
+            return r.width > 20 && r.height > 8;
+        };
+        const list = [];
+        const add = (el) => { if (terlihat(el)) list.push(el); };
+        add(document.querySelector('#prompt-textarea'));
+        add(document.querySelector('[data-testid="prompt-textarea"]'));
+        document.querySelectorAll('div.ProseMirror[contenteditable="true"], [contenteditable="true"]').forEach(add);
+        if (!list.length) return null;
+        list.sort((a, b) => b.getBoundingClientRect().y - a.getBoundingClientRect().y);
+        const el = list[0];
+        el.focus();
+        const r = el.getBoundingClientRect();
+        return { x: r.x + Math.min(28, r.width / 2), y: r.y + Math.min(18, r.height / 2) };
+    }).catch(() => null);
+    if (pos) await page.mouse.click(pos.x, pos.y, { delay: 30 }).catch(() => {});
+    await page.waitForTimeout(150);
+    await page.keyboard.press('Enter');
+    await page.waitForTimeout(400);
+}
+
+async function simpanLaporanGagalKirim(folderHasil, htmlSebelum, page) {
+    if (!folderHasil) return;
+    const root = path.join(folderHasil, 'laporan');
+    fs.mkdirSync(root, { recursive: true });
+    let n = nomorLaporanKirim;
+    if (!n) {
+        const ada = fs.readdirSync(root).filter((name) => /^fail_send_\d+$/.test(name));
+        const max = ada.reduce((m, name) => Math.max(m, parseInt(name.slice(10), 10) || 0), 0);
+        n = max;
+    }
+    n += 1;
+    nomorLaporanKirim = n;
+    const dir = path.join(root, `fail_send_${n}`);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'before.html'), htmlSebelum || '', 'utf8');
+    const htmlSesudah = await page.content().catch(() => '');
+    fs.writeFileSync(path.join(dir, 'after.html'), htmlSesudah || '', 'utf8');
+    console.log(`[CHATGPT] Laporan gagal kirim → laporan/fail_send_${n}/before.html + after.html`);
+}
+
 // =====================================================================
 // ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸Ãƒâ€šÃ‚Â§Ãƒâ€šÃ‚Â¹ NUX memory (Got it / Mengerti) ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â minimal, tidak mengganggu composer
 
@@ -780,6 +827,7 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
 
         let copyAwal = 0;
         let terkirim = false;
+        let htmlSebelumKirim = null;
         for (let upayaKirim = 1; upayaKirim <= 2 && !terkirim; upayaKirim++) {
         if (upayaKirim > 1) {
             console.log('[CHATGPT] Prompt masih di kolom. Refresh halaman lalu ulang proses...');
@@ -965,12 +1013,21 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
         const sinyalSebelumKirim = await bacaStatusTombolComposer(page);
         copyAwal = sinyalSebelumKirim.copyCount || 0;
         console.log(`[CHATGPT] Mengirim tugas... btn=${sinyalSebelumKirim.status} aria="${sinyalSebelumKirim.aria}" copyAwal=${copyAwal}`);
+        if (htmlSebelumKirim == null) {
+            htmlSebelumKirim = await page.content().catch(() => '');
+            console.log('[CHATGPT] HTML sebelum kirim diambil');
+        }
         let how = '';
         for (let klik = 1; klik <= 3 && !terkirim; klik++) {
             await tutupDialogPengganggu(page);
             how = await klikSendAtauEnter(page);
             console.log(`[CHATGPT] Send method: ${how} (klik ${klik}/3)`);
             terkirim = await kirimTerkonfirmasi(page, promptTeks);
+            if (!terkirim && how !== 'enter') {
+                console.log(`[CHATGPT] Send method: enter (klik ${klik}/3)`);
+                await tekanEnterComposer(page);
+                terkirim = await kirimTerkonfirmasi(page, promptTeks);
+            }
             if (!terkirim) console.log('[CHATGPT] Kirim belum terkonfirmasi, klik lagi...');
         }
         if (!terkirim) {
@@ -987,7 +1044,10 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
         console.log('[CHATGPT] Kirim terkonfirmasi');
         await stepShot(page, folderHasil, '08_after_send');
         }
-        if (!terkirim) throw new Error('SEND_GAGAL: tombol Kirim tidak mengirim tugas');
+        if (!terkirim) {
+            await simpanLaporanGagalKirim(folderHasil, htmlSebelumKirim, page);
+            throw new Error('SEND_GAGAL: tombol Kirim tidak mengirim tugas');
+        }
 
         // Radar: selesai saat tombol suara kembali (Mulai Suara / Start Voice).
         // Jangan tunggu tombol Salin ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â di page pool aria/testid salin sering tidak cocok
