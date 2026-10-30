@@ -7,8 +7,8 @@
 const path = require('path');
 
 const TARGET = 10;
-const MIN_BEFORE_WORK = 5;
-const PAUSE_AT = 3;
+const MIN_BEFORE_WORK = 1;
+const PAUSE_AT = 5;
 const WAIT_MS = 20 * 60 * 1000;
 
 let deps = {};
@@ -155,8 +155,9 @@ async function scanLoop() {
       const item = await cookieSehat(index);
       if (!item) continue;
       healthy.push(item);
-      if (healthy.length >= MIN_BEFORE_WORK) gateOpen = true;
+      gateOpen = true;
       logList(`tambah #${item.index}`);
+      if (aktif() < 5) await sleep(700);
     }
     if (nextScan > max) {
       scanExhausted = true;
@@ -177,14 +178,15 @@ async function start(folderHasil) {
   const n = parseInt(raw, 10);
   bootIndex = Number.isFinite(n) && n > 0 ? n : 0;
   nextScan = bootIndex + 1;
-  console.log(`[CEK] redis index=${bootIndex} dibaca sekali. Cek satu per satu mulai #${nextScan}. Target ${TARGET} sehat, gateway menunggu minimal ${MIN_BEFORE_WORK}. Browser langsung ditutup.`);
+  console.log(`[CEK] redis index=${bootIndex} dibaca sekali. Cek satu per satu mulai #${nextScan}. Slot dipakai begitu ada 1 sehat. Browser langsung ditutup.`);
   poke();
 }
 
 /**
  * Ambil cookie paling kecil di daftar.
- * Menunggu kalau daftar belum 5 (mesin baru) atau sedang kosong atau 5 tugas sedang jalan.
- * Tidak menolak. Index Redis ditulis lewat deps.commitIndex sebelum browser tugas dibuka.
+ * Menunggu kalau daftar kosong atau 5 tugas sedang jalan.
+ * Slot pertama langsung boleh dipakai. Tidak menolak.
+ * Index Redis ditulis lewat deps.commitIndex sebelum browser tugas dibuka.
  */
 async function takeNext() {
   const startedAt = Date.now();
