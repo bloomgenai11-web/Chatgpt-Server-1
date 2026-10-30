@@ -2,7 +2,7 @@
 set -euo pipefail
 
 echo "=============================================="
-echo "[start] postStart — gate then bot + gateway (detached)"
+echo "[start] postStart — gateway saja (bot_github nonaktif)"
 echo "=============================================="
 
 export DEBIAN_FRONTEND=noninteractive
@@ -170,11 +170,10 @@ RUNEOF
   fi
 }
 
-echo "[start] ALL OK — detached launch"
-launch_one "bot_github" "bot_github.js"
+echo "[start] ALL OK — detached launch (bot_github tidak dijalankan)"
 launch_one "gateway" "gateway.js"
 
-echo "[start] follow: tail -f $ROOT/bot_github.log $ROOT/gateway.log"
+echo "[start] follow: tail -f $ROOT/gateway.log"
 echo "[start] postStart exiting (processes independent of this shell)"
 echo "=============================================="
 exit 0
