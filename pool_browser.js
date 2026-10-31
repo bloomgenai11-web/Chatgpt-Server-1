@@ -149,9 +149,11 @@ function poke() {
 async function scanLoop() {
   try {
     const max = deps.MAX_COOKIES || 300;
-    while (healthy.length < TARGET && nextScan <= max) {
+    let scanned = 0;
+    while (healthy.length < TARGET && scanned < max) {
       const index = nextScan;
-      nextScan += 1;
+      scanned += 1;
+      nextScan = index >= max ? 1 : index + 1;
       const item = await cookieSehat(index);
       if (!item) continue;
       healthy.push(item);
@@ -159,10 +161,10 @@ async function scanLoop() {
       logList(`tambah #${item.index}`);
       if (aktif() < 5) await sleep(700);
     }
-    if (nextScan > max) {
+    if (scanned >= max) {
       scanExhausted = true;
       if (healthy.length > 0) gateOpen = true;
-      console.log(`[CEK] pemeriksaan sampai #${max} selesai. Sehat: ${listText()}`);
+      console.log(`[CEK] satu putaran #1–#${max} selesai. Sehat: ${listText()}`);
     }
   } finally {
     scanning = false;
@@ -177,8 +179,9 @@ async function start(folderHasil) {
   const raw = await deps.redis.get('global_chatgpt_index');
   const n = parseInt(raw, 10);
   bootIndex = Number.isFinite(n) && n > 0 ? n : 0;
-  nextScan = bootIndex + 1;
-  console.log(`[CEK] redis index=${bootIndex} dibaca sekali. Cek satu per satu mulai #${nextScan}. Slot dipakai begitu ada 1 sehat. Browser langsung ditutup.`);
+  const max = deps.MAX_COOKIES || 300;
+  nextScan = bootIndex >= max ? 1 : bootIndex + 1;
+  console.log(`[CEK] redis index=${bootIndex} dibaca sekali. Cek satu per satu mulai #${nextScan}${bootIndex >= max ? ' (putar dari #' + max + ' ke #1)' : ''}. Slot dipakai begitu ada 1 sehat. Browser langsung ditutup.`);
   poke();
 }
 
