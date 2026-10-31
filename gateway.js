@@ -234,9 +234,9 @@ async function catatIndexDipakai(index) {
     const raw = await redis.get('global_chatgpt_index');
     const cur0 = parseInt(raw, 10);
     const current = Number.isFinite(cur0) && cur0 > 0 ? cur0 : 0;
-    if (n > current) {
+    if (n > current || (current >= MAX_COOKIES && n < current)) {
         await redis.set('global_chatgpt_index', n);
-        console.log(`[COOKIE] index ${current} â†’ ${n} (dipakai tugas sekarang)`);
+        console.log(`[COOKIE] index ${current} → ${n}${current >= MAX_COOKIES && n < current ? ' (putar)' : ''} (dipakai tugas sekarang)`);
     }
 }
 
