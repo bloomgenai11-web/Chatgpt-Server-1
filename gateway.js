@@ -277,8 +277,12 @@ async function kerjakanDenganBrowserBaru(action, prompt, isThinkingMode, transla
         });
         return { hasil, label: launched.label };
     } finally {
-        if (context) await context.close().catch(() => {});
-        if (browser) await browser.close().catch(() => {});
+        const tutupContext = context;
+        const tutupBrowser = browser;
+        setImmediate(() => {
+            if (tutupContext) tutupContext.close().catch(() => {});
+            if (tutupBrowser) tutupBrowser.close().catch(() => {});
+        });
     }
 }
 
