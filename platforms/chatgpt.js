@@ -695,6 +695,52 @@ async function simpanLaporanGagalKirim(folderHasil, htmlSebelum, page) {
     console.log(`[CHATGPT] Laporan gagal kirim → laporan/fail_send_${n}/before.html + after.html`);
 }
 
+function slugJejak(s) {
+    return String(s || 'tanpa').replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 50) || 'tanpa';
+}
+
+function buatJejakKirim(folderHasil) {
+    if (!folderHasil) return null;
+    const root = path.join(folderHasil, 'laporan');
+    fs.mkdirSync(root, { recursive: true });
+    const id = Date.now();
+    const dir = path.join(root, `kirim_${id}_berjalan`);
+    fs.mkdirSync(dir, { recursive: true });
+    return { id, dir, root, langkah: 0, daftar: [] };
+}
+
+async function simpanHtmlJejak(jejak, page, nama) {
+    if (!jejak) return '';
+    jejak.langkah += 1;
+    const file = `${String(jejak.langkah).padStart(2, '0')}_${slugJejak(nama)}.html`;
+    const html = await page.content().catch(() => '');
+    fs.writeFileSync(path.join(jejak.dir, file), html || '', 'utf8');
+    jejak.daftar.push(file);
+    console.log(`[CHATGPT] HTML ${file}`);
+    return file.replace(/\.html$/, '');
+}
+
+function tutupJejakKirim(jejak, hasil, langkah) {
+    if (!jejak) return;
+    const tanda = hasil === 'berhasil'
+        ? `kirim_${jejak.id}_berhasil_${slugJejak(langkah)}`
+        : `kirim_${jejak.id}_gagal`;
+    try {
+        fs.writeFileSync(path.join(jejak.dir, 'keterangan.txt'), [
+            `hasil=${hasil}`,
+            `langkah=${langkah || '-'}`,
+            ...jejak.daftar
+        ].join('\n'));
+    } catch (e) {}
+    const dest = path.join(jejak.root, tanda);
+    try {
+        fs.renameSync(jejak.dir, dest);
+        console.log(`[CHATGPT] Jejak kirim → laporan/${tanda}/`);
+    } catch (e) {
+        console.log(`[CHATGPT] Jejak kirim tidak ter-rename: ${e.message}`);
+    }
+}
+
 // =====================================================================
 // ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸Ãƒâ€šÃ‚Â§Ãƒâ€šÃ‚Â¹ NUX memory (Got it / Mengerti) ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â minimal, tidak mengganggu composer
 
@@ -828,6 +874,8 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
         let copyAwal = 0;
         let terkirim = false;
         let htmlSebelumKirim = null;
+        let jejakKirim = null;
+        let langkahBerhasil = '';
         for (let upayaKirim = 1; upayaKirim <= 2 && !terkirim; upayaKirim++) {
         if (upayaKirim > 1) {
             console.log('[CHATGPT] Prompt masih di kolom. Refresh halaman lalu ulang proses...');
@@ -836,6 +884,7 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
             await klikAreaKosong(page);
             await tungguComposerSiap(page, 30000);
             await tutupDialogPengganggu(page);
+            await simpanHtmlJejak(jejakKirim, page, `upaya${upayaKirim}_setelah_reload`);
         }
 
         // Upaya pertama: composer kosong, tunggu Start Voice.
@@ -1016,6 +1065,8 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
         if (htmlSebelumKirim == null) {
             htmlSebelumKirim = await page.content().catch(() => '');
             console.log('[CHATGPT] HTML sebelum kirim diambil');
+            jejakKirim = buatJejakKirim(folderHasil);
+            await simpanHtmlJejak(jejakKirim, page, '00_sebelum_kirim');
         }
         let how = '';
         for (let klik = 1; klik <= 3 && !terkirim; klik++) {
@@ -1023,10 +1074,20 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
             how = await klikSendAtauEnter(page);
             console.log(`[CHATGPT] Send method: ${how} (klik ${klik}/3)`);
             terkirim = await kirimTerkonfirmasi(page, promptTeks);
-            if (!terkirim && how !== 'enter') {
+            const namaKlik = await simpanHtmlJejak(jejakKirim, page, `upaya${upayaKirim}_setelah_klik${klik}_${how || 'tanpa'}${terkirim ? '_BERHASIL' : ''}`);
+            if (terkirim) {
+                langkahBerhasil = namaKlik;
+                break;
+            }
+            if (how !== 'enter') {
                 console.log(`[CHATGPT] Send method: enter (klik ${klik}/3)`);
                 await tekanEnterComposer(page);
                 terkirim = await kirimTerkonfirmasi(page, promptTeks);
+                const namaEnter = await simpanHtmlJejak(jejakKirim, page, `upaya${upayaKirim}_setelah_enter${klik}${terkirim ? '_BERHASIL' : ''}`);
+                if (terkirim) {
+                    langkahBerhasil = namaEnter;
+                    break;
+                }
             }
             if (!terkirim) console.log('[CHATGPT] Kirim belum terkonfirmasi, klik lagi...');
         }
@@ -1036,18 +1097,20 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
                 if (folderHasil) {
                     const fp = path.join(folderHasil, `fail_send_${Date.now()}.png`);
                     await page.screenshot({ path: fp, fullPage: true }).catch(() => {});
-                    console.log(`[CHATGPT] SS gagal kirim â†’ ${path.basename(fp)}`);
+                    console.log(`[CHATGPT] SS gagal kirim -> ${path.basename(fp)}`);
                 }
             } catch (_) {}
             continue;
         }
-        console.log('[CHATGPT] Kirim terkonfirmasi');
+        console.log(`[CHATGPT] Kirim terkonfirmasi di ${langkahBerhasil}`);
         await stepShot(page, folderHasil, '08_after_send');
         }
         if (!terkirim) {
+            tutupJejakKirim(jejakKirim, 'gagal', 'tidak_terkirim');
             await simpanLaporanGagalKirim(folderHasil, htmlSebelumKirim, page);
             throw new Error('SEND_GAGAL: tombol Kirim tidak mengirim tugas');
         }
+        tutupJejakKirim(jejakKirim, 'berhasil', langkahBerhasil);
 
         // Radar: selesai saat tombol suara kembali (Mulai Suara / Start Voice).
         // Jangan tunggu tombol Salin ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â di page pool aria/testid salin sering tidak cocok
