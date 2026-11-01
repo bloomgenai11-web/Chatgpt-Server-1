@@ -771,6 +771,34 @@ async function lihatChipLampiran(page) {
     }).catch(() => ({ uploading: false, blob: 0, data: 0, chip: 0 }));
 }
 
+async function bacaLingkaranLampiran(page) {
+    return page.evaluate(() => {
+        const root = document.querySelector('[data-composer-attachments]');
+        if (!root) return { bar: false, now: null };
+        const bars = Array.from(root.querySelectorAll('[role="progressbar"]'));
+        if (!bars.length) return { bar: false, now: null };
+        const nums = bars
+            .map((b) => Number(b.getAttribute('aria-valuenow')))
+            .filter((n) => Number.isFinite(n));
+        return { bar: true, now: nums.length ? Math.max(...nums) : null };
+    }).catch(() => ({ bar: false, now: null }));
+}
+
+/** Kalau lingkaran sudah 100 atau tidak ada, langsung kembali. Tidak mengubah klik yang sudah berhasil. */
+async function tungguLingkaranPenuh(page, timeoutMs = 12000) {
+    const t0 = Date.now();
+    let terakhir = await bacaLingkaranLampiran(page);
+    if (!terakhir.bar || terakhir.now === 100) return terakhir;
+    console.log(`[CHATGPT] Lingkaran lampiran belum 100 (now=${terakhir.now}). Menunggu sebelum klik.`);
+    while (Date.now() - t0 < timeoutMs) {
+        await page.waitForTimeout(250);
+        terakhir = await bacaLingkaranLampiran(page);
+        if (!terakhir.bar || terakhir.now === 100) break;
+    }
+    console.log(`[CHATGPT] Lingkaran sebelum klik: bar=${terakhir.bar} now=${terakhir.now} tunggu=${Date.now() - t0}ms`);
+    return terakhir;
+}
+
 async function promptMasihDiKolom(page, promptTeks) {
     const cup = (promptTeks || '').trim().slice(0, 48);
     if (!cup) return false;
@@ -1176,6 +1204,7 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
         const berkasGambar = validFiles.filter((f) => extGambar.includes(path.extname(f).toLowerCase()));
         if (berkasGambar.length) {
             await tutupDialogPengganggu(page);
+            await tungguLingkaranPenuh(page);
             how = await klikSendMouse(page);
             console.log(`[CHATGPT] Send method: ${how || 'tidak ada tombol'} (klik 1, mouse saja)`);
             terkirim = await kirimTerkonfirmasi(page, promptTeks);
@@ -1187,6 +1216,7 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
                 console.log(`[CHATGPT] Klik pertama tidak mengunci. chip uploading=${chip.uploading} blob=${chip.blob} data=${chip.data}`);
                 if (chip.uploading && chip.blob > 0 && chip.data === 0) {
                     console.log('[CHATGPT] Overlay Uploading masih ada. Satu klik mouse lagi, tanpa Enter.');
+                    await tungguLingkaranPenuh(page);
                     how = await klikSendMouse(page);
                     terkirim = await kirimTerkonfirmasi(page, promptTeks);
                     nama = await simpanHtmlJejak(jejakKirim, page, `upaya${upayaKirim}_setelah_klik2_${how || 'tanpa'}${terkirim ? '_BERHASIL' : ''}`);
@@ -1207,6 +1237,7 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
                         console.log('[CHATGPT] Overlay Uploading tidak muncul. Tidak mengklik Send.');
                         continue;
                     }
+                    await tungguLingkaranPenuh(page);
                     how = await klikSendMouse(page);
                     console.log(`[CHATGPT] Send method: ${how || 'tidak ada tombol'} (pulih ${pulih}, mouse saja)`);
                     terkirim = await kirimTerkonfirmasi(page, promptTeks);
