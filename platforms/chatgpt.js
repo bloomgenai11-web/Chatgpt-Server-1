@@ -569,7 +569,7 @@ async function klikDiTitik(page, cari) {
     return box.label || 'mouse';
 }
 
-async function klikSendAtauEnter(page) {
+async function klikSendMouse(page) {
     const how = await klikDiTitik(page, () => {
         const terlihat = (el) => {
             if (!el || !el.isConnected) return false;
@@ -621,6 +621,12 @@ async function klikSendAtauEnter(page) {
         });
     }).catch(() => false);
     if (pending) return 'upload-pending';
+    return '';
+}
+
+async function klikSendAtauEnter(page) {
+    const how = await klikSendMouse(page);
+    if (how) return how;
     await page.keyboard.press('Enter');
     await page.waitForTimeout(400);
     return 'enter';
@@ -739,6 +745,96 @@ function tutupJejakKirim(jejak, hasil, langkah) {
     } catch (e) {
         console.log(`[CHATGPT] Jejak kirim tidak ter-rename: ${e.message}`);
     }
+}
+
+/** Chip di composer saja. Bukan gambar lain di halaman. */
+async function lihatChipLampiran(page) {
+    return page.evaluate(() => {
+        const root = document.querySelector('[data-composer-attachments]')
+            || document.querySelector('form[data-chatgpt-composer]');
+        if (!root) return { uploading: false, blob: 0, data: 0, chip: 0 };
+        const bars = Array.from(root.querySelectorAll('[role="progressbar"]'));
+        const uploading = bars.some((el) => /^uploading\b/i.test((el.getAttribute('aria-label') || '').trim()));
+        let blob = 0;
+        let data = 0;
+        root.querySelectorAll('img').forEach((img) => {
+            const src = img.getAttribute('src') || '';
+            if (src.startsWith('blob:')) blob += 1;
+            else if (src.startsWith('data:image')) data += 1;
+        });
+        const chip = root.querySelectorAll('[role="button"][aria-label], .composer-attachment-surface[role="button"]').length;
+        return { uploading, blob, data, chip };
+    }).catch(() => ({ uploading: false, blob: 0, data: 0, chip: 0 }));
+}
+
+async function promptMasihDiKolom(page, promptTeks) {
+    const cup = (promptTeks || '').trim().slice(0, 48);
+    if (!cup) return false;
+    return page.evaluate((cuplikan) => {
+        const nodes = Array.from(document.querySelectorAll('#prompt-textarea, textarea, [contenteditable="true"]'));
+        return nodes.some((el) => ((el.innerText || el.value || '').trim()).includes(cuplikan));
+    }, cup).catch(() => false);
+}
+
+/** Hanya dipakai saat chip sudah macet. Tidak dipanggil pada klik pertama yang berhasil. */
+async function hapusChipLampiran(page) {
+    for (let i = 0; i < 4; i++) {
+        const ada = await page.evaluate(() => {
+            return Array.from(document.querySelectorAll('button')).some((b) => /^(remove|hapus)\b/i.test((b.getAttribute('aria-label') || '').trim()));
+        }).catch(() => false);
+        if (!ada) break;
+        const how = await klikDiTitik(page, () => {
+            const terlihat = (el) => {
+                if (!el || !el.isConnected) return false;
+                const r = el.getBoundingClientRect();
+                if (r.width < 4 || r.height < 4) return false;
+                const cs = window.getComputedStyle(el);
+                return cs.display !== 'none' && cs.visibility !== 'hidden';
+            };
+            const btn = Array.from(document.querySelectorAll('button')).filter(terlihat).find((b) => /^(remove|hapus)\b/i.test((b.getAttribute('aria-label') || '').trim()));
+            if (!btn) return null;
+            const r = btn.getBoundingClientRect();
+            return { x: r.x + r.width / 2, y: r.y + r.height / 2, label: 'remove' };
+        });
+        if (!how) {
+            await page.evaluate(() => {
+                const btn = Array.from(document.querySelectorAll('button')).find((b) => /^(remove|hapus)\b/i.test((b.getAttribute('aria-label') || '').trim()));
+                if (btn) btn.click();
+            }).catch(() => {});
+        }
+        await page.waitForTimeout(300);
+    }
+    await page.evaluate(() => {
+        document.querySelectorAll('input[type="file"]').forEach((input) => {
+            try { input.value = ''; } catch (e) {}
+        });
+    }).catch(() => {});
+}
+
+async function tempelUlangDanTungguOverlay(page, files) {
+    const sisa = await lihatChipLampiran(page);
+    if (sisa.blob > 0 || sisa.data > 0 || sisa.uploading) {
+        console.log(`[CHATGPT] Chip lama masih ada (blob=${sisa.blob} data=${sisa.data}). Tidak menempel ulang, supaya tidak jadi (1).`);
+        return false;
+    }
+    let terpasang = false;
+    await page.waitForSelector('input[type="file"]', { state: 'attached', timeout: 5000 }).catch(() => {});
+    const inputs = await page.locator('input[type="file"]').all();
+    for (const input of inputs) {
+        try {
+            await input.setInputFiles(files);
+            terpasang = true;
+            break;
+        } catch (e) {}
+    }
+    if (!terpasang) return false;
+    const t0 = Date.now();
+    while (Date.now() - t0 < 20000) {
+        const k = await lihatChipLampiran(page);
+        if (k.uploading && k.blob > 0) return true;
+        await page.waitForTimeout(300);
+    }
+    return false;
 }
 
 // =====================================================================
@@ -1069,27 +1165,74 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
             await simpanHtmlJejak(jejakKirim, page, '00_sebelum_kirim');
         }
         let how = '';
-        for (let klik = 1; klik <= 3 && !terkirim; klik++) {
+        const extGambar = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.heic'];
+        const berkasGambar = validFiles.filter((f) => extGambar.includes(path.extname(f).toLowerCase()));
+        if (berkasGambar.length) {
             await tutupDialogPengganggu(page);
-            how = await klikSendAtauEnter(page);
-            console.log(`[CHATGPT] Send method: ${how} (klik ${klik}/3)`);
+            how = await klikSendMouse(page);
+            console.log(`[CHATGPT] Send method: ${how || 'tidak ada tombol'} (klik 1, mouse saja)`);
             terkirim = await kirimTerkonfirmasi(page, promptTeks);
-            const namaKlik = await simpanHtmlJejak(jejakKirim, page, `upaya${upayaKirim}_setelah_klik${klik}_${how || 'tanpa'}${terkirim ? '_BERHASIL' : ''}`);
+            let nama = await simpanHtmlJejak(jejakKirim, page, `upaya${upayaKirim}_setelah_klik1_${how || 'tanpa'}${terkirim ? '_BERHASIL' : ''}`);
             if (terkirim) {
-                langkahBerhasil = namaKlik;
-                break;
-            }
-            if (how !== 'enter') {
-                console.log(`[CHATGPT] Send method: enter (klik ${klik}/3)`);
-                await tekanEnterComposer(page);
-                terkirim = await kirimTerkonfirmasi(page, promptTeks);
-                const namaEnter = await simpanHtmlJejak(jejakKirim, page, `upaya${upayaKirim}_setelah_enter${klik}${terkirim ? '_BERHASIL' : ''}`);
-                if (terkirim) {
-                    langkahBerhasil = namaEnter;
-                    break;
+                langkahBerhasil = nama;
+            } else {
+                const chip = await lihatChipLampiran(page);
+                console.log(`[CHATGPT] Klik pertama tidak mengunci. chip uploading=${chip.uploading} blob=${chip.blob} data=${chip.data}`);
+                if (chip.uploading && chip.blob > 0 && chip.data === 0) {
+                    console.log('[CHATGPT] Overlay Uploading masih ada. Satu klik mouse lagi, tanpa Enter.');
+                    how = await klikSendMouse(page);
+                    terkirim = await kirimTerkonfirmasi(page, promptTeks);
+                    nama = await simpanHtmlJejak(jejakKirim, page, `upaya${upayaKirim}_setelah_klik2_${how || 'tanpa'}${terkirim ? '_BERHASIL' : ''}`);
+                    if (terkirim) langkahBerhasil = nama;
+                }
+                for (let pulih = 1; pulih <= 2 && !terkirim; pulih++) {
+                    const sekarang = await lihatChipLampiran(page);
+                    console.log(`[CHATGPT] Pulih ${pulih}/2. Hapus chip macet lalu tempel ulang. data=${sekarang.data} blob=${sekarang.blob} uploading=${sekarang.uploading}`);
+                    await hapusChipLampiran(page);
+                    await simpanHtmlJejak(jejakKirim, page, `pulih${pulih}_setelah_hapus_chip`);
+                    if (!(await promptMasihDiKolom(page, promptTeks))) {
+                        console.log('[CHATGPT] Prompt hilang saat chip dihapus. Disuntik lagi.');
+                        await suntikPromptKeComposer(page, promptTeks);
+                    }
+                    const overlay = await tempelUlangDanTungguOverlay(page, berkasGambar);
+                    await simpanHtmlJejak(jejakKirim, page, `pulih${pulih}_${overlay ? 'overlay_ada' : 'overlay_tidak_ada'}`);
+                    if (!overlay) {
+                        console.log('[CHATGPT] Overlay Uploading tidak muncul. Tidak mengklik Send.');
+                        continue;
+                    }
+                    how = await klikSendMouse(page);
+                    console.log(`[CHATGPT] Send method: ${how || 'tidak ada tombol'} (pulih ${pulih}, mouse saja)`);
+                    terkirim = await kirimTerkonfirmasi(page, promptTeks);
+                    nama = await simpanHtmlJejak(jejakKirim, page, `pulih${pulih}_setelah_klik_${how || 'tanpa'}${terkirim ? '_BERHASIL' : ''}`);
+                    if (terkirim) {
+                        langkahBerhasil = nama;
+                        break;
+                    }
                 }
             }
-            if (!terkirim) console.log('[CHATGPT] Kirim belum terkonfirmasi, klik lagi...');
+        } else {
+            for (let klik = 1; klik <= 3 && !terkirim; klik++) {
+                await tutupDialogPengganggu(page);
+                how = await klikSendAtauEnter(page);
+                console.log(`[CHATGPT] Send method: ${how} (klik ${klik}/3)`);
+                terkirim = await kirimTerkonfirmasi(page, promptTeks);
+                const namaKlik = await simpanHtmlJejak(jejakKirim, page, `upaya${upayaKirim}_setelah_klik${klik}_${how || 'tanpa'}${terkirim ? '_BERHASIL' : ''}`);
+                if (terkirim) {
+                    langkahBerhasil = namaKlik;
+                    break;
+                }
+                if (how !== 'enter') {
+                    console.log(`[CHATGPT] Send method: enter (klik ${klik}/3)`);
+                    await tekanEnterComposer(page);
+                    terkirim = await kirimTerkonfirmasi(page, promptTeks);
+                    const namaEnter = await simpanHtmlJejak(jejakKirim, page, `upaya${upayaKirim}_setelah_enter${klik}${terkirim ? '_BERHASIL' : ''}`);
+                    if (terkirim) {
+                        langkahBerhasil = namaEnter;
+                        break;
+                    }
+                }
+                if (!terkirim) console.log('[CHATGPT] Kirim belum terkonfirmasi, klik lagi...');
+            }
         }
         if (!terkirim) {
             console.log('[CHATGPT] Kirim belum terjadi (masih tombol Kirim / prompt masih di kolom). Tidak masuk radar.');
@@ -1100,6 +1243,7 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
                     console.log(`[CHATGPT] SS gagal kirim -> ${path.basename(fp)}`);
                 }
             } catch (_) {}
+            if (berkasGambar.length) break;
             continue;
         }
         console.log(`[CHATGPT] Kirim terkonfirmasi di ${langkahBerhasil}`);
