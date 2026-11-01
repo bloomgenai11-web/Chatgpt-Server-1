@@ -457,6 +457,7 @@ async function bacaStatusTombolComposer(page) {
             !isStop(x) && (
                 x.testid === 'send-button' ||
                 (x.submitId && !kosong) ||
+                (x.typeSubmit && x.inForm && !kosong) ||
                 /^kirim perintah$/i.test(x.aria) ||
                 /^kirim$/i.test(x.aria) ||
                 /^send prompt$/i.test(x.aria) ||
@@ -584,6 +585,9 @@ async function klikSendMouse(page) {
             const testid = b.getAttribute('data-testid') || '';
             const aria = (b.getAttribute('aria-label') || '').trim();
             if (testid === 'stop-button' || /^stop$/i.test(aria) || /^hentikan jawaban$/i.test(aria)) return false;
+            const type = (b.getAttribute('type') || '').toLowerCase();
+            const form = b.closest('form[data-chatgpt-composer]');
+            if (form && type === 'submit') return true;
             return b.id === 'composer-submit-button' ||
                 testid === 'send-button' ||
                 /^kirim perintah$/i.test(aria) ||
@@ -754,7 +758,7 @@ async function lihatChipLampiran(page) {
             || document.querySelector('form[data-chatgpt-composer]');
         if (!root) return { uploading: false, blob: 0, data: 0, chip: 0 };
         const bars = Array.from(root.querySelectorAll('[role="progressbar"]'));
-        const uploading = bars.some((el) => /^uploading\b/i.test((el.getAttribute('aria-label') || '').trim()));
+        const uploading = bars.length > 0;
         let blob = 0;
         let data = 0;
         root.querySelectorAll('img').forEach((img) => {
@@ -780,7 +784,8 @@ async function promptMasihDiKolom(page, promptTeks) {
 async function hapusChipLampiran(page) {
     for (let i = 0; i < 4; i++) {
         const ada = await page.evaluate(() => {
-            return Array.from(document.querySelectorAll('button')).some((b) => /^(remove|hapus)\b/i.test((b.getAttribute('aria-label') || '').trim()));
+            const root = document.querySelector('[data-composer-attachments]');
+            return !!(root && root.querySelector('button'));
         }).catch(() => false);
         if (!ada) break;
         const how = await klikDiTitik(page, () => {
@@ -791,14 +796,16 @@ async function hapusChipLampiran(page) {
                 const cs = window.getComputedStyle(el);
                 return cs.display !== 'none' && cs.visibility !== 'hidden';
             };
-            const btn = Array.from(document.querySelectorAll('button')).filter(terlihat).find((b) => /^(remove|hapus)\b/i.test((b.getAttribute('aria-label') || '').trim()));
+            const root = document.querySelector('[data-composer-attachments]');
+            const btn = root && Array.from(root.querySelectorAll('button')).filter(terlihat)[0];
             if (!btn) return null;
             const r = btn.getBoundingClientRect();
-            return { x: r.x + r.width / 2, y: r.y + r.height / 2, label: 'remove' };
+            return { x: r.x + r.width / 2, y: r.y + r.height / 2, label: 'remove-chip' };
         });
         if (!how) {
             await page.evaluate(() => {
-                const btn = Array.from(document.querySelectorAll('button')).find((b) => /^(remove|hapus)\b/i.test((b.getAttribute('aria-label') || '').trim()));
+                const root = document.querySelector('[data-composer-attachments]');
+                const btn = root && root.querySelector('button');
                 if (btn) btn.click();
             }).catch(() => {});
         }
