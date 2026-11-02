@@ -444,6 +444,10 @@ async function bacaStatusTombolComposer(page) {
                 iconVoice: Array.from(b.querySelectorAll('use')).some((u) => {
                     const h = u.getAttribute('href') || u.getAttribute('xlink:href') || '';
                     return h.includes('codex-icon-voice');
+                }),
+                iconStop: Array.from(b.querySelectorAll('use')).some((u) => {
+                    const h = u.getAttribute('href') || u.getAttribute('xlink:href') || '';
+                    return /codex-icon-stop|icon-player-stop|icon-stop/i.test(h);
                 })
             };
         };
@@ -451,6 +455,7 @@ async function bacaStatusTombolComposer(page) {
         const kosong = composerKosong();
         const isStop = (x) =>
             x.testid === 'stop-button' ||
+            x.iconStop ||
             /^hentikan jawaban$/i.test(x.aria) ||
             /^stop$/i.test(x.aria);
         const isSend = (x) =>
@@ -905,8 +910,39 @@ async function tempelUlangDanTungguOverlay(page, files) {
     return false;
 }
 
+async function catatLampiranDiHalaman(page, jejak, validFiles) {
+    let namaHalaman = [];
+    try {
+        namaHalaman = await page.evaluate(() => {
+            const out = [];
+            document.querySelectorAll('input[type="file"]').forEach((inp) => {
+                if (!inp.files) return;
+                for (let i = 0; i < inp.files.length; i++) out.push(inp.files[i].name);
+            });
+            return out;
+        });
+    } catch (e) {}
+    const j = jejak || {};
+    console.log(
+        `[JEJAK] HALAMAN sesi=${j.sesi ?? '-'} jenis=${j.jenis || '-'} giliran=${j.giliran || '-'} ` +
+        `lampiran_diterima=${j.lampiran_diterima || '-'} lampiran_kirim=${j.lampiran_kirim || '-'} ` +
+        `lampiran_disk=${(validFiles || []).map((f) => path.basename(f)).join(',') || '-'} ` +
+        `lampiran_di_halaman=${namaHalaman.join(',') || '-'}`
+    );
+}
+
+function namaHasilJejak(jejak, i) {
+    const j = jejak || {};
+    const bersih = (s) => String(s || '').replace(/[^A-Za-z0-9._-]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '').slice(0, 80);
+    if (j.sesi == null && !j.jenis) return `chatgpt_IMG_${Date.now()}_${i + 1}.webp`;
+    const sesi = j.sesi != null ? `s${j.sesi}` : 's0';
+    const jenis = bersih(j.jenis) || 'tugas';
+    const giliran = bersih(j.giliran) || 'na';
+    const wajah = bersih(j.lampiran_diterima) || 'wajah';
+    return `${sesi}_${jenis}_${giliran}_${wajah}_IMG_${Date.now()}_${i + 1}.webp`;
+}
+
 // =====================================================================
-// ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸Ãƒâ€šÃ‚Â§Ãƒâ€šÃ‚Â¹ NUX memory (Got it / Mengerti) ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â minimal, tidak mengganggu composer
 
 
 // =====================================================================
@@ -938,6 +974,14 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
         promptTeks = /^\[create image\]/i.test(raw) ? raw : `[Create Image] ${raw}`.trim();
         console.log(`[CHATGPT] Mode gambar tanpa klik plus. Prompt diawali [Create Image]`);
     }
+
+    const jejak = (options && options.jejak && typeof options.jejak === 'object') ? options.jejak : {};
+    console.log(
+        `[JEJAK] MULAI sesi=${jejak.sesi ?? '-'} jenis=${jejak.jenis || '-'} giliran=${jejak.giliran || '-'} ` +
+        `lampiran_diterima=${jejak.lampiran_diterima || '-'} lampiran_kirim=${jejak.lampiran_kirim || '-'} ` +
+        `lampiran_disk=${validFiles.map((f) => path.basename(f)).join(',') || '-'} ` +
+        `cookie=${(options && options.cookieId) || '-'}`
+    );
 
     if (chatgptTag()) {
         console.log(`[CHATGPT] ${chatgptTag()}task=${tipeTugas} thinking=${!!isThinkingMode} files=${validFiles.length}`);
@@ -1181,6 +1225,8 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
                     }
                 } catch (e) { console.log(`[CHATGPT] ÃƒÆ’Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒâ€¦Ã¢â‚¬â„¢ Error Gambar: ${e.message}`); }
             }
+
+            await catatLampiranDiHalaman(page, jejak, validFiles);
 
             // Pantau lampiran (dari Script 2)
             console.log(`[CHATGPT] ÃƒÆ’Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒâ€šÃ‚Â³ Menunggu visualisasi file di layar...`);
@@ -1427,9 +1473,10 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
                 continue;
             }
 
-            // Selesai = composer kembali ke Mulai Suara / Start Voice.
-            // Tombol salin tidak wajib (di pool copy sering tetap 0 meski jawaban sudah ada).
-            const selesaiSinyal = btnSt.status === 'idle' && btnSt.voice;
+            // Selesai hanya jika ikon suara benar-benar kembali.
+            // Cadangan struktur bisa mengira tombol Stop (Berhenti / 停止) sebagai suara
+            // karena kolom sudah kosong, lalu gambar diambil sebelum jadi.
+            const selesaiSinyal = btnSt.status === 'idle' && btnSt.voice && btnSt.via === 'icon';
             if (!selesaiSinyal) {
                 if ((Date.now() - waktuMulai) % 8000 < 1400) {
                     console.log(`[CHATGPT] radar wait btn=${btnSt.status} aria="${btnSt.aria}" copy=${btnSt.copyCount || 0}/${copyAwal} voice=${btnSt.voice}`);
@@ -1631,7 +1678,7 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
             console.log(`\n[CHATGPT] ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã¢â‚¬Å“ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ Mengunduh ${hasilEktraksi.images.length} gambar buatan AI...`);
             for (let i = 0; i < hasilEktraksi.images.length; i++) {
                 const imgUrl = hasilEktraksi.images[i];
-                const fileName = `chatgpt_IMG_${Date.now()}_${i + 1}.webp`;
+                const fileName = namaHasilJejak(jejak, i);
                 const dest = path.join(folderHasil, fileName);
                 try {
                     if (/^blob:|^data:/i.test(imgUrl)) {
@@ -1653,7 +1700,14 @@ async function _eksekusiChatGPTImpl(tipeTugas, promptTeks, isThinkingMode, fileI
                     } else {
                         await sedotNative(imgUrl, dest, context);
                     }
-                    if (fs.existsSync(dest) && fs.statSync(dest).size > 0) fileTersimpanArray.push(fileName);
+                    if (fs.existsSync(dest) && fs.statSync(dest).size > 0) {
+                        fileTersimpanArray.push(fileName);
+                        console.log(
+                            `[JEJAK] HASIL sesi=${jejak.sesi ?? '-'} jenis=${jejak.jenis || '-'} giliran=${jejak.giliran || '-'} ` +
+                            `lampiran_diterima=${jejak.lampiran_diterima || '-'} lampiran_kirim=${jejak.lampiran_kirim || '-'} ` +
+                            `lampiran_disk=${validFiles.map((f) => path.basename(f)).join(',') || '-'} hasil=${fileName}`
+                        );
+                    }
                 } catch (e) {
                     console.log(`[CHATGPT] ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â¡ ÃƒÆ’Ã‚Â¯Ãƒâ€šÃ‚Â¸Ãƒâ€šÃ‚Â Gagal unduh gambar: ${e.message}`);
                 }
