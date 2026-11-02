@@ -287,6 +287,32 @@ async function kerjakanDenganBrowserBaru(action, prompt, isThinkingMode, transla
     }
 }
 
+const jobById = new Map();
+const jobByKey = new Map();
+let jobUrut = 0;
+
+function kunciJejak(jejak) {
+    if (!jejak || jejak.sesi == null || !jejak.jenis || !jejak.giliran) return '';
+    return [jejak.sesi, jejak.jenis, jejak.giliran, jejak.percobaan ?? 1, jejak.lampiran_kirim || ''].join('|');
+}
+
+function simpanJob(job) {
+    jobById.set(job.id, job);
+    if (job.key) jobByKey.set(job.key, job);
+    setTimeout(() => {
+        jobById.delete(job.id);
+        if (job.key && jobByKey.get(job.key) === job) jobByKey.delete(job.key);
+    }, 30 * 60 * 1000);
+}
+
+function jawabJob(req, res) {
+    const job = jobById.get(String(req.body.pollJobId || ''));
+    if (!job) return res.status(404).json({ status: 'failed', error: 'job tidak ada' });
+    if (job.status === 'running') return res.json({ status: 'pending', jobId: job.id });
+    if (job.status === 'success') return res.json(job.response);
+    return res.status(500).json({ status: 'failed', error: job.error || 'gagal', jobId: job.id });
+}
+
 // Daftar SS kegagalan terbaru (dashboard Vercel)
 app.get('/api/failures', (req, res) => {
     try {
@@ -322,11 +348,17 @@ app.get('/api/health', async (req, res) => {
 });
 
 app.post('/api/generate', async (req, res) => {
+    if (req.body && req.body.pollJobId) return jawabJob(req, res);
     if (isRetiring) return res.status(503).json({ error: "Sistem estafet aktif. Silakan request ulang." });
 
     const { action = 'CHAT', prompt, isThinkingMode = false, fileArray = [], jejak = null } = req.body;
     const jejakAman = jejak && typeof jejak === 'object' ? jejak : {};
-    let translatedFiles = [];
+    const kunci = kunciJejak(jejakAman);
+    const ada = kunci ? jobByKey.get(kunci) : null;
+    if (ada && ada.status !== 'failed') {
+        console.log(`[JEJAK] GABUNG job=${ada.id} sesi=${jejakAman.sesi} jenis=${jejakAman.jenis} giliran=${jejakAman.giliran} — koneksi ulang, browser tidak dibuka lagi`);
+        return res.json({ status: 'accepted', jobId: ada.id, gabung: true });
+    }
 
     console.log(
         `[JEJAK] TERIMA sesi=${jejakAman.sesi ?? '-'} jenis=${jejakAman.jenis || '-'} giliran=${jejakAman.giliran || '-'} ` +
@@ -334,52 +366,61 @@ app.post('/api/generate', async (req, res) => {
         `lampiran_kirim=${jejakAman.lampiran_kirim || (Array.isArray(fileArray) ? fileArray.map((f) => f && f.name).filter(Boolean).join(',') : '-') || '-'}`
     );
 
-    if (fileArray && fileArray.length > 0) {
-        fileArray.forEach((fileObj, index) => {
-            const matches = fileObj.base64 && fileObj.base64.match(/^data:(.+);base64,(.+)$/);
-            if (matches && matches.length === 3) {
-                const buffer = Buffer.from(matches[2], 'base64');
-                let originalExt = path.extname(fileObj.name || '');
-                if (!originalExt) originalExt = '.bin';
-                const stem = path.basename(String(fileObj.name || ''), originalExt).replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 140);
-                const safeName = `${stem || 'upload'}_${Date.now()}_${index}${originalExt}`;
-                const tempFilePath = path.join(folderTemp, safeName);
-                fs.writeFileSync(tempFilePath, buffer);
-                translatedFiles.push(tempFilePath);
-                console.log(
-                    `[JEJAK] DISK sesi=${jejakAman.sesi ?? '-'} jenis=${jejakAman.jenis || '-'} giliran=${jejakAman.giliran || '-'} ` +
-                    `lampiran_nama=${fileObj.name || '-'} lampiran_disk=${safeName} byte=${buffer.length}`
-                );
-            }
-        });
-    }
+    const job = { id: `job_${Date.now()}_${++jobUrut}`, key: kunci, status: 'running', response: null, error: '' };
+    simpanJob(job);
+    // Balas sebelum browser dibuka. Cloudflare memutus koneksi yang diam lebih dari ~100 detik.
+    res.json({ status: 'accepted', jobId: job.id, gabung: false });
 
-    let reserved = false;
+    const translatedFiles = [];
     try {
+        if (fileArray && fileArray.length > 0) {
+            fileArray.forEach((fileObj, index) => {
+                const matches = fileObj.base64 && fileObj.base64.match(/^data:(.+);base64,(.+)$/);
+                if (matches && matches.length === 3) {
+                    const buffer = Buffer.from(matches[2], 'base64');
+                    let originalExt = path.extname(fileObj.name || '');
+                    if (!originalExt) originalExt = '.bin';
+                    const stem = path.basename(String(fileObj.name || ''), originalExt).replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 140);
+                    const safeName = `${stem || 'upload'}_${Date.now()}_${index}${originalExt}`;
+                    const tempFilePath = path.join(folderTemp, safeName);
+                    fs.writeFileSync(tempFilePath, buffer);
+                    translatedFiles.push(tempFilePath);
+                    console.log(
+                        `[JEJAK] DISK sesi=${jejakAman.sesi ?? '-'} jenis=${jejakAman.jenis || '-'} giliran=${jejakAman.giliran || '-'} ` +
+                        `lampiran_nama=${fileObj.name || '-'} lampiran_disk=${safeName} byte=${buffer.length}`
+                    );
+                }
+            });
+        }
         if (!poolBrowser || typeof poolBrowser.takeNext !== 'function') {
             throw new Error('pemeriksa cookie belum siap');
         }
         const activeUrl = await redis.get('active_gateway_url') || `http://localhost:${PORT}`;
         const sesi = await poolBrowser.takeNext();
-        reserved = true;
         console.log(`[GATEWAY] tugas memakai ${sesi.id} — daftar sehat tersisa dicek ulang di [CEK]`);
-        console.log(`[JEJAK] COOKIE sesi=${jejakAman.sesi ?? '-'} jenis=${jejakAman.jenis || '-'} giliran=${jejakAman.giliran || '-'} cookie=${sesi.id}`);
-        const out = await kerjakanDenganBrowserBaru(action, prompt, isThinkingMode, translatedFiles, sesi, jejakAman);
-        const hasilNama = (out.hasil.files || []).join(',');
-        console.log(`[JEJAK] SELESAI sesi=${jejakAman.sesi ?? '-'} jenis=${jejakAman.jenis || '-'} giliran=${jejakAman.giliran || '-'} cookie=${sesi.id} hasil=${hasilNama || '-'}`);
-        res.json({
-            status: 'success',
-            worker: sesi.id,
-            network: out.label,
-            text: out.hasil.text,
-            fileUrls: (out.hasil.files || []).map(f => `${activeUrl}/files/${f}`),
-        });
+        console.log(`[JEJAK] COOKIE job=${job.id} sesi=${jejakAman.sesi ?? '-'} jenis=${jejakAman.jenis || '-'} giliran=${jejakAman.giliran || '-'} cookie=${sesi.id}`);
+        try {
+            const out = await kerjakanDenganBrowserBaru(action, prompt, isThinkingMode, translatedFiles, sesi, jejakAman);
+            const hasilNama = (out.hasil.files || []).join(',');
+            console.log(`[JEJAK] SELESAI job=${job.id} sesi=${jejakAman.sesi ?? '-'} jenis=${jejakAman.jenis || '-'} giliran=${jejakAman.giliran || '-'} cookie=${sesi.id} hasil=${hasilNama || '-'}`);
+            job.status = 'success';
+            job.response = {
+                status: 'success',
+                jobId: job.id,
+                worker: sesi.id,
+                network: out.label,
+                text: out.hasil.text,
+                fileUrls: (out.hasil.files || []).map(f => `${activeUrl}/files/${f}`),
+            };
+        } finally {
+            if (poolBrowser && typeof poolBrowser.releaseWorker === 'function') poolBrowser.releaseWorker();
+        }
     } catch (error) {
-        console.error(`[JEJAK] GAGAL sesi=${jejakAman.sesi ?? '-'} jenis=${jejakAman.jenis || '-'} giliran=${jejakAman.giliran || '-'} alasan=${error.message}`);
+        job.status = 'failed';
+        job.error = error.message;
+        console.error(`[JEJAK] GAGAL job=${job.id} sesi=${jejakAman.sesi ?? '-'} jenis=${jejakAman.jenis || '-'} giliran=${jejakAman.giliran || '-'} alasan=${error.message}`);
         console.error(`[GATEWAY] ❌ TUGAS GAGAL: ${error.message}`);
-        if (!res.headersSent) res.status(500).json({ status: 'failed', error: error.message });
     } finally {
-        if (reserved && poolBrowser && typeof poolBrowser.releaseWorker === 'function') poolBrowser.releaseWorker();
         translatedFiles.forEach(file => { if (fs.existsSync(file)) fs.unlinkSync(file); });
     }
 });
