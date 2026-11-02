@@ -263,7 +263,7 @@ function pasangPemeriksa() {
     });
 }
 
-async function kerjakanDenganBrowserBaru(action, prompt, isThinkingMode, translatedFiles, sesi) {
+async function kerjakanDenganBrowserBaru(action, prompt, isThinkingMode, translatedFiles, sesi, jejak) {
     let browser = null;
     let context = null;
     try {
@@ -274,6 +274,7 @@ async function kerjakanDenganBrowserBaru(action, prompt, isThinkingMode, transla
         console.log(`[GATEWAY] browser baru fingerprint baru cookie=${sesi.id}`);
         const hasil = await chatgptModule.eksekusiChatGPT(action, prompt, isThinkingMode, translatedFiles, folderHasil, context, {
             cookieId: sesi.id,
+            jejak: jejak || null,
         });
         return { hasil, label: launched.label };
     } finally {
@@ -323,8 +324,15 @@ app.get('/api/health', async (req, res) => {
 app.post('/api/generate', async (req, res) => {
     if (isRetiring) return res.status(503).json({ error: "Sistem estafet aktif. Silakan request ulang." });
 
-    const { action = 'CHAT', prompt, isThinkingMode = false, fileArray = [] } = req.body;
+    const { action = 'CHAT', prompt, isThinkingMode = false, fileArray = [], jejak = null } = req.body;
+    const jejakAman = jejak && typeof jejak === 'object' ? jejak : {};
     let translatedFiles = [];
+
+    console.log(
+        `[JEJAK] TERIMA sesi=${jejakAman.sesi ?? '-'} jenis=${jejakAman.jenis || '-'} giliran=${jejakAman.giliran || '-'} ` +
+        `percobaan=${jejakAman.percobaan ?? '-'} lampiran_diterima=${jejakAman.lampiran_diterima || '-'} ` +
+        `lampiran_kirim=${jejakAman.lampiran_kirim || (Array.isArray(fileArray) ? fileArray.map((f) => f && f.name).filter(Boolean).join(',') : '-') || '-'}`
+    );
 
     if (fileArray && fileArray.length > 0) {
         fileArray.forEach((fileObj, index) => {
@@ -333,11 +341,15 @@ app.post('/api/generate', async (req, res) => {
                 const buffer = Buffer.from(matches[2], 'base64');
                 let originalExt = path.extname(fileObj.name || '');
                 if (!originalExt) originalExt = '.bin';
-
-                const safeName = `upload_${Date.now()}_${index}${originalExt}`;
+                const stem = path.basename(String(fileObj.name || ''), originalExt).replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 140);
+                const safeName = `${stem || 'upload'}_${Date.now()}_${index}${originalExt}`;
                 const tempFilePath = path.join(folderTemp, safeName);
                 fs.writeFileSync(tempFilePath, buffer);
                 translatedFiles.push(tempFilePath);
+                console.log(
+                    `[JEJAK] DISK sesi=${jejakAman.sesi ?? '-'} jenis=${jejakAman.jenis || '-'} giliran=${jejakAman.giliran || '-'} ` +
+                    `lampiran_nama=${fileObj.name || '-'} lampiran_disk=${safeName} byte=${buffer.length}`
+                );
             }
         });
     }
@@ -350,8 +362,11 @@ app.post('/api/generate', async (req, res) => {
         const activeUrl = await redis.get('active_gateway_url') || `http://localhost:${PORT}`;
         const sesi = await poolBrowser.takeNext();
         reserved = true;
-        console.log(`[GATEWAY] tugas memakai ${sesi.id} â€” daftar sehat tersisa dicek ulang di [CEK]`);
-        const out = await kerjakanDenganBrowserBaru(action, prompt, isThinkingMode, translatedFiles, sesi);
+        console.log(`[GATEWAY] tugas memakai ${sesi.id} — daftar sehat tersisa dicek ulang di [CEK]`);
+        console.log(`[JEJAK] COOKIE sesi=${jejakAman.sesi ?? '-'} jenis=${jejakAman.jenis || '-'} giliran=${jejakAman.giliran || '-'} cookie=${sesi.id}`);
+        const out = await kerjakanDenganBrowserBaru(action, prompt, isThinkingMode, translatedFiles, sesi, jejakAman);
+        const hasilNama = (out.hasil.files || []).join(',');
+        console.log(`[JEJAK] SELESAI sesi=${jejakAman.sesi ?? '-'} jenis=${jejakAman.jenis || '-'} giliran=${jejakAman.giliran || '-'} cookie=${sesi.id} hasil=${hasilNama || '-'}`);
         res.json({
             status: 'success',
             worker: sesi.id,
@@ -360,7 +375,8 @@ app.post('/api/generate', async (req, res) => {
             fileUrls: (out.hasil.files || []).map(f => `${activeUrl}/files/${f}`),
         });
     } catch (error) {
-        console.error(`[GATEWAY] âŒ TUGAS GAGAL: ${error.message}`);
+        console.error(`[JEJAK] GAGAL sesi=${jejakAman.sesi ?? '-'} jenis=${jejakAman.jenis || '-'} giliran=${jejakAman.giliran || '-'} alasan=${error.message}`);
+        console.error(`[GATEWAY] ❌ TUGAS GAGAL: ${error.message}`);
         if (!res.headersSent) res.status(500).json({ status: 'failed', error: error.message });
     } finally {
         if (reserved && poolBrowser && typeof poolBrowser.releaseWorker === 'function') poolBrowser.releaseWorker();
