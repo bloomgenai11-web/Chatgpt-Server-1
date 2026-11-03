@@ -2,7 +2,8 @@
  * Pemeriksa cookie. Bukan pool browser.
  * Tidak ada browser standby. Satu per satu: buka, cek sehat, tutup.
  * Daftar sehat maksimal 10, urut dari kecil ke besar, hanya di memori.
- * Redis index dibaca sekali saat mulai. Tidak ditulis oleh pemeriksa.
+ * Redis index dibaca sekali saat mulai. Pemeriksa tidak menggeser index.
+ * Cookie kadaluarsa masuk list redis chatgpt_cookie_mati, tanpa nomor ganda.
  */
 const path = require('path');
 
@@ -63,6 +64,26 @@ function formatCookie(rawData, index) {
 }
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+const KUNCI_MATI = 'chatgpt_cookie_mati';
+
+async function catatCookieMati(index, alasan) {
+  const n = parseInt(index, 10);
+  if (!Number.isFinite(n) || n < 1 || !deps.redis) return;
+  const nomor = String(n);
+  try {
+    const daftar = await deps.redis.lrange(KUNCI_MATI, 0, -1);
+    const ada = Array.isArray(daftar) && daftar.some((x) => String(x) === nomor);
+    if (ada) {
+      console.log(`[CEK] #${nomor} sudah ada di chatgpt_cookie_mati — tidak ditambahkan`);
+      return;
+    }
+    await deps.redis.rpush(KUNCI_MATI, nomor);
+    console.log(`[CEK] #${nomor} masuk chatgpt_cookie_mati (${alasan})`);
+  } catch (e) {
+    console.log(`[CEK] #${nomor} gagal catat redis: ${e.message}`);
+  }
+}
 
 async function checkOnce(item) {
   let browser = null;
@@ -127,7 +148,10 @@ async function cookieSehat(index) {
       attempt += 1;
       const invalid = /COOKIE_INVALID/.test(e.message || '');
       console.log(`[CEK] #${index} gagal: ${e.message}`);
-      if (invalid) break;
+      if (invalid) {
+        await catatCookieMati(index, e.message);
+        break;
+      }
     } finally {
       cekTerbuka = false;
     }
@@ -239,4 +263,4 @@ function releaseWorker() {
   poke();
 }
 
-module.exports = { setDeps, start, takeNext, releaseWorker, snapshot };
+module.exports = { setDeps, start, takeNext, releaseWorker, snapshot, catatCookieMati };
