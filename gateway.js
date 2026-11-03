@@ -372,6 +372,7 @@ app.post('/api/generate', async (req, res) => {
     res.json({ status: 'accepted', jobId: job.id, gabung: false });
 
     const translatedFiles = [];
+    let sesiDipakai = null;
     try {
         if (fileArray && fileArray.length > 0) {
             fileArray.forEach((fileObj, index) => {
@@ -397,6 +398,7 @@ app.post('/api/generate', async (req, res) => {
         }
         const activeUrl = await redis.get('active_gateway_url') || `http://localhost:${PORT}`;
         const sesi = await poolBrowser.takeNext();
+        sesiDipakai = sesi;
         console.log(`[GATEWAY] tugas memakai ${sesi.id} — daftar sehat tersisa dicek ulang di [CEK]`);
         console.log(`[JEJAK] COOKIE job=${job.id} sesi=${jejakAman.sesi ?? '-'} jenis=${jejakAman.jenis || '-'} giliran=${jejakAman.giliran || '-'} cookie=${sesi.id}`);
         try {
@@ -416,6 +418,9 @@ app.post('/api/generate', async (req, res) => {
             if (poolBrowser && typeof poolBrowser.releaseWorker === 'function') poolBrowser.releaseWorker();
         }
     } catch (error) {
+        if (sesiDipakai && /COOKIE_INVALID/.test(error.message || '') && poolBrowser && typeof poolBrowser.catatCookieMati === 'function') {
+            await poolBrowser.catatCookieMati(sesiDipakai.index, error.message).catch(() => {});
+        }
         job.status = 'failed';
         job.error = error.message;
         console.error(`[JEJAK] GAGAL job=${job.id} sesi=${jejakAman.sesi ?? '-'} jenis=${jejakAman.jenis || '-'} giliran=${jejakAman.giliran || '-'} alasan=${error.message}`);
