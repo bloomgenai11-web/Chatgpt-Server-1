@@ -111,13 +111,17 @@ async function stepShot(page, folderHasil, label) {
 async function deteksiLoginAtauSignup(page) {
     return page.evaluate(() => {
         const texts = [];
-        document.querySelectorAll('button, a, [role="button"]').forEach((el) => {
+        const ambil = (el) => {
             const t = (el.innerText || el.textContent || el.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
-            if (t && t.length < 40) texts.push(t);
-        });
+            if (t && t.length < 80) texts.push(t);
+            el.querySelectorAll('img[alt]').forEach((img) => {
+                const alt = (img.getAttribute('alt') || '').replace(/\s+/g, ' ').trim();
+                if (alt && alt.length < 80) texts.push(alt);
+            });
+        };
+        document.querySelectorAll('button, a, [role="button"]').forEach(ambil);
         const body = (document.body && document.body.innerText) ? document.body.innerText.slice(0, 4000) : '';
-        const joined = texts.join(' | ').toLowerCase();
-        const bodyL = body.toLowerCase();
+        const judul = Array.from(document.querySelectorAll('h1, h2')).map((el) => (el.innerText || '').replace(/\s+/g, ' ').trim()).filter(Boolean).join(' | ');
 
         const patterns = [
             /^log\s*in$/i,
@@ -133,13 +137,42 @@ async function deteksiLoginAtauSignup(page) {
                 if (re.test(t.trim())) return { hit: true, via: 'btn:' + t };
             }
         }
-        // Auth wall umum di chatgpt.com
-        if (/log in or sign up/i.test(body) || /welcome to chatgpt/i.test(body) && /log in/i.test(body)) {
+        if (/log in or sign up/i.test(body) || (/welcome to chatgpt/i.test(body) && /log in/i.test(body))) {
             return { hit: true, via: 'body-auth-wall' };
         }
-        // data-testid auth
+        if (/登录或注册|sign up or log in|masuk atau daftar|daftar atau masuk/i.test(judul + '\n' + body)) {
+            return { hit: true, via: 'judul-auth' };
+        }
         if (document.querySelector('[data-testid="login-button"], [data-testid="signup-button"]')) {
             return { hit: true, via: 'testid-auth' };
+        }
+        const url = String(location.href || '');
+        if (/auth\.openai\.com|\/auth\/login|\/log-in(?:\/|$|\?)/i.test(url)) {
+            return { hit: true, via: 'url-auth' };
+        }
+
+        const composerAda = () => {
+            const cukup = (el) => {
+                if (!el) return false;
+                const st = window.getComputedStyle(el);
+                if (!st || st.display === 'none' || st.visibility === 'hidden') return false;
+                const r = el.getBoundingClientRect();
+                return r.width > 20 && r.height > 10;
+            };
+            if (cukup(document.querySelector('#prompt-textarea'))) return true;
+            if (cukup(document.querySelector('[data-testid="prompt-textarea"]'))) return true;
+            return !!document.querySelector('div.ProseMirror[contenteditable="true"]');
+        };
+        if (composerAda()) return { hit: false, via: '' };
+
+        const adaMerek = texts.some((t) => /google/i.test(t)) || texts.some((t) => /\bapple\b/i.test(t));
+        const adaEmail = Array.from(document.querySelectorAll('input')).some((el) => {
+            const bag = [el.type, el.name, el.id, el.getAttribute('autocomplete'), el.getAttribute('placeholder'), el.getAttribute('aria-label')].join(' ');
+            return el.type === 'email' || /email|e-mail|username|邮箱/i.test(bag);
+        });
+        if (adaMerek && adaEmail) return { hit: true, via: 'form-oauth' };
+        if (texts.some((t) => /google/i.test(t)) && texts.some((t) => /\bapple\b/i.test(t))) {
+            return { hit: true, via: 'oauth-duo' };
         }
         return { hit: false, via: '' };
     });
