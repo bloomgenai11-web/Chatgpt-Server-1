@@ -2,8 +2,12 @@
  * Pemeriksa cookie. Bukan pool browser.
  * Tidak ada browser standby. Satu per satu: buka, cek sehat, tutup.
  * Daftar sehat maksimal 10, urut dari kecil ke besar, hanya di memori.
- * Redis index dibaca sekali saat mulai. Pemeriksa tidak menggeser index.
- * Cookie kadaluarsa masuk list redis chatgpt_cookie_mati, tanpa nomor ganda.
+ * Isi cookie dibaca dari Redis utama satu kali, lalu disimpan di memori
+ * selama masih menunggu tugas atau percobaan kedua. Dibuang setelah
+ * dipakai tugas, mati, atau gagal. Putaran berikutnya membaca Redis lagi.
+ * global_chatgpt_index dibaca dari Redis kedua (redisIndex), sekali saat mulai.
+ * Pemeriksa tidak menggeser index.
+ * Cookie kadaluarsa masuk list redis utama chatgpt_cookie_mati, tanpa nomor ganda.
  */
 const path = require('path');
 
@@ -23,6 +27,7 @@ let gateOpen = false;
 let bootIndex = 0;
 let taking = false;
 let cekTerbuka = false;
+const simpanan = new Map();
 
 function setDeps(d) { deps = d || {}; }
 
@@ -31,7 +36,7 @@ function listText() {
 }
 
 function logList(why) {
-  console.log(`[CEK] ${why} | sehat ${healthy.length}/${TARGET}: ${listText()} | berikutnya=#${nextScan}`);
+  console.log(`[CEK] ${why} | sehat ${healthy.length}/${TARGET}: ${listText()} | memori=${simpanan.size} | berikutnya=#${nextScan}`);
 }
 
 function snapshot() {
@@ -64,6 +69,31 @@ function formatCookie(rawData, index) {
 }
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+function dbIndex() {
+  return deps.redisIndex || deps.redis;
+}
+
+async function ambilCookie(index) {
+  if (simpanan.has(index)) {
+    console.log(`[CEK] #${index} dari memori, Redis tidak dibaca`);
+    return simpanan.get(index);
+  }
+  const raw = await deps.redis.get(`cookie_chatgpt_${index}`);
+  const item = formatCookie(raw, index);
+  if (!item) {
+    console.log(`[CEK] #${index} tidak ada data — lewati`);
+    return null;
+  }
+  simpanan.set(index, item);
+  console.log(`[CEK] #${index} dibaca Redis 1 kali, disimpan di memori`);
+  return item;
+}
+
+function buangCookie(index, alasan) {
+  if (!simpanan.delete(index)) return;
+  console.log(`[CEK] #${index} dibuang dari memori (${alasan})`);
+}
 
 const KUNCI_MATI = 'chatgpt_cookie_mati';
 
@@ -118,12 +148,8 @@ function aktif() {
 }
 
 async function cookieSehat(index) {
-  const raw = await deps.redis.get(`cookie_chatgpt_${index}`);
-  const item = formatCookie(raw, index);
-  if (!item) {
-    console.log(`[CEK] #${index} tidak ada data — lewati`);
-    return null;
-  }
+  const item = await ambilCookie(index);
+  if (!item) return null;
   let last = null;
   let attempt = 1;
   let tungguLog = 0;
@@ -139,9 +165,9 @@ async function cookieSehat(index) {
     cekTerbuka = true;
     try {
       if (aktif() >= PAUSE_AT) continue;
-      console.log(`[CEK] cek #${index} percobaan ${attempt}/2`);
+      console.log(`[CEK] cek #${index} percobaan ${attempt}/2 (memori)`);
       await checkOnce(item);
-      console.log(`[CEK] #${index} SEHAT`);
+      console.log(`[CEK] #${index} SEHAT, tetap di memori sampai ada tugas`);
       return item;
     } catch (e) {
       last = e;
@@ -150,12 +176,14 @@ async function cookieSehat(index) {
       console.log(`[CEK] #${index} gagal: ${e.message}`);
       if (invalid) {
         await catatCookieMati(index, e.message);
+        buangCookie(index, 'kadaluarsa');
         break;
       }
     } finally {
       cekTerbuka = false;
     }
   }
+  buangCookie(index, 'gagal cek');
   console.log(`[CEK] #${index} tidak masuk daftar (${last ? last.message : 'gagal'})`);
   return null;
 }
@@ -178,6 +206,10 @@ async function scanLoop() {
       const index = nextScan;
       scanned += 1;
       nextScan = index >= max ? 1 : index + 1;
+      if (healthy.some((x) => x.index === index)) {
+        console.log(`[CEK] #${index} sudah di daftar sehat, Redis tidak dibaca`);
+        continue;
+      }
       const item = await cookieSehat(index);
       if (!item) continue;
       healthy.push(item);
@@ -185,14 +217,14 @@ async function scanLoop() {
       logList(`tambah #${item.index}`);
       if (aktif() < 5) await sleep(700);
     }
-    if (scanned >= max) {
-      scanExhausted = true;
-      if (healthy.length > 0) gateOpen = true;
-      console.log(`[CEK] satu putaran #1–#${max} selesai. Sehat: ${listText()}`);
+    if (scanned >= max && healthy.length < TARGET) {
+      console.log(`[CEK] satu putaran #1–#${max} selesai. Sehat: ${listText()}. Memori=${simpanan.size}`);
+      console.log('[CEK] jeda 60s. Cookie yang sudah dibuang baru dibaca lagi dari Redis pada putaran ini.');
+      await sleep(60000);
     }
   } finally {
     scanning = false;
-    if (healthy.length < TARGET && !scanExhausted) poke();
+    if (healthy.length < TARGET) poke();
   }
 }
 
@@ -200,12 +232,13 @@ async function start(folderHasil) {
   if (started) return;
   started = true;
   folder = folderHasil;
-  const raw = await deps.redis.get('global_chatgpt_index');
+  const raw = await dbIndex().get('global_chatgpt_index');
   const n = parseInt(raw, 10);
   bootIndex = Number.isFinite(n) && n > 0 ? n : 0;
   const max = deps.MAX_COOKIES || 300;
   nextScan = bootIndex >= max ? 1 : bootIndex + 1;
-  console.log(`[CEK] redis index=${bootIndex} dibaca sekali. Cek satu per satu mulai #${nextScan}${bootIndex >= max ? ' (putar dari #' + max + ' ke #1)' : ''}. Slot dipakai begitu ada 1 sehat. Browser langsung ditutup.`);
+  const sumber = deps.redisIndex ? 'Redis kedua' : 'Redis utama';
+  console.log(`[CEK] index=${bootIndex} dibaca sekali dari ${sumber}. Cek satu per satu mulai #${nextScan}${bootIndex >= max ? ' (putar dari #' + max + ' ke #1)' : ''}. Isi cookie dari Redis utama, sekali, lalu di memori. Slot dipakai begitu ada 1 sehat.`);
   poke();
 }
 
@@ -215,15 +248,21 @@ async function start(folderHasil) {
  * Slot pertama langsung boleh dipakai. Tidak menolak.
  * Index Redis ditulis lewat deps.commitIndex sebelum browser tugas dibuka.
  */
-async function takeNext() {
+async function takeNext(deadlineMs) {
   const startedAt = Date.now();
   let lastLog = 0;
   while (Date.now() - startedAt < WAIT_MS) {
+    if (deadlineMs && Date.now() >= deadlineMs) {
+      throw new Error('TIMEOUT_5MENIT: tugas belum selesai dalam 5 menit');
+    }
     if (healthy.length >= MIN_BEFORE_WORK) gateOpen = true;
     if (scanExhausted && healthy.length > 0) gateOpen = true;
 
     const active = aktif();
     if (!taking && gateOpen && healthy.length > 0 && active < 5 && !cekTerbuka) {
+      if (deadlineMs && Date.now() >= deadlineMs) {
+        throw new Error('TIMEOUT_5MENIT: tugas belum selesai dalam 5 menit');
+      }
       taking = true;
       const item = healthy.shift();
       try {
@@ -235,6 +274,7 @@ async function takeNext() {
         throw e;
       }
       taking = false;
+      buangCookie(item.index, 'diserahkan ke tugas');
       logList(`pakai #${item.index} untuk tugas`);
       poke();
       return item;
