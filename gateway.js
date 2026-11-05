@@ -43,6 +43,19 @@ const redis = new Redis({
   token: process.env.UPSTASH_REDIS_REST_TOKEN,
 });
 
+const redisIndex = (process.env.UPSTASH_REDIS2_REST_URL && process.env.UPSTASH_REDIS2_REST_TOKEN)
+  ? new Redis({
+      url: process.env.UPSTASH_REDIS2_REST_URL,
+      token: process.env.UPSTASH_REDIS2_REST_TOKEN,
+    })
+  : redis;
+
+if (redisIndex === redis) {
+  console.log('[COOKIE] UPSTASH_REDIS2 belum diisi. global_chatgpt_index tetap di Redis utama.');
+} else {
+  console.log('[COOKIE] global_chatgpt_index memakai Redis kedua.');
+}
+
 const { startDeadman } = require('./qstash_deadman');
 
 function ghHeaders(pat) {
@@ -86,6 +99,8 @@ function initialProxyMode() {
     return 'none';
 }
 let proxyMode = initialProxyMode();
+let proxyIp = null;
+let urlMesinIni = '';
 
 function curlViaProxy(proxyUrl, cb) {
     exec(`curl -s --max-time 12 -x "${proxyUrl}" https://api.ipify.org`, (error, stdout) => {
@@ -97,10 +112,7 @@ function curlViaProxy(proxyUrl, cb) {
 function setMode(mode, ip, logLine) {
     if (logLine && proxyMode !== mode) console.log(logLine);
     proxyMode = mode;
-    const healthy = mode === 'none' ? '0' : '1';
-    redis.set('proxy_healthy', healthy).catch(() => {});
-    redis.set('proxy_mode', mode).catch(() => {});
-    if (ip) redis.set('proxy_current_ip', ip).catch(() => {});
+    if (ip) proxyIp = ip;
 }
 
 function monitorProxy() {
@@ -231,11 +243,11 @@ const MAX_PARALLEL = 5;
 async function catatIndexDipakai(index) {
     const n = parseInt(index, 10);
     if (!Number.isFinite(n) || n < 1) return;
-    const raw = await redis.get('global_chatgpt_index');
+    const raw = await redisIndex.get('global_chatgpt_index');
     const cur0 = parseInt(raw, 10);
     const current = Number.isFinite(cur0) && cur0 > 0 ? cur0 : 0;
     if (n > current || (current >= MAX_COOKIES && n < current)) {
-        await redis.set('global_chatgpt_index', n);
+        await redisIndex.set('global_chatgpt_index', n);
         console.log(`[COOKIE] index ${current} → ${n}${current >= MAX_COOKIES && n < current ? ' (putar)' : ''} (dipakai tugas sekarang)`);
     }
 }
@@ -253,6 +265,7 @@ function pasangPemeriksa() {
     if (!poolBrowser || typeof poolBrowser.setDeps !== 'function') return;
     poolBrowser.setDeps({
         redis,
+        redisIndex,
         launchGatewayBrowser,
         chatgptModule,
         MAX_COOKIES,
@@ -263,13 +276,17 @@ function pasangPemeriksa() {
     });
 }
 
-async function kerjakanDenganBrowserBaru(action, prompt, isThinkingMode, translatedFiles, sesi, jejak) {
+async function kerjakanDenganBrowserBaru(action, prompt, isThinkingMode, translatedFiles, sesi, jejak, hidup) {
     let browser = null;
     let context = null;
     try {
+        if (hidup && hidup.habis) throw new Error('TIMEOUT_5MENIT: tugas belum selesai dalam 5 menit');
         const launched = await launchGatewayBrowser();
         browser = launched.browser;
+        if (hidup) hidup.browser = browser;
+        if (hidup && hidup.habis) throw new Error('TIMEOUT_5MENIT: tugas belum selesai dalam 5 menit');
         context = await browser.newContext({ acceptDownloads: true });
+        if (hidup) hidup.context = context;
         await context.addCookies(sesi.cookies);
         console.log(`[GATEWAY] browser baru fingerprint baru cookie=${sesi.id}`);
         const hasil = await chatgptModule.eksekusiChatGPT(action, prompt, isThinkingMode, translatedFiles, folderHasil, context, {
@@ -332,12 +349,10 @@ app.get('/api/failures', (req, res) => {
 
 app.get('/api/health', async (req, res) => {
     try {
-        const mode = await redis.get('proxy_mode').catch(() => null);
-        const ip = await redis.get('proxy_current_ip').catch(() => null);
         res.json({
             status: 'ok',
-            proxyMode: mode || proxyMode,
-            proxyIp: ip || null,
+            proxyMode,
+            proxyIp: proxyIp || null,
             healthy: poolBrowser && poolBrowser.snapshot ? poolBrowser.snapshot() : null,
             maxParallel: MAX_PARALLEL,
             activeWorkers: jumlahTugasAktif,
@@ -373,6 +388,8 @@ app.post('/api/generate', async (req, res) => {
 
     const translatedFiles = [];
     let sesiDipakai = null;
+    let timerTugas = null;
+    const hidup = { habis: false, browser: null, context: null };
     try {
         if (fileArray && fileArray.length > 0) {
             fileArray.forEach((fileObj, index) => {
@@ -396,13 +413,27 @@ app.post('/api/generate', async (req, res) => {
         if (!poolBrowser || typeof poolBrowser.takeNext !== 'function') {
             throw new Error('pemeriksa cookie belum siap');
         }
-        const activeUrl = await redis.get('active_gateway_url') || `http://localhost:${PORT}`;
-        const sesi = await poolBrowser.takeNext();
+        const activeUrl = urlMesinIni || await redis.get('active_gateway_url') || `http://localhost:${PORT}`;
+        const batasPada = Date.now() + 5 * 60 * 1000;
+        timerTugas = setTimeout(() => {
+            if (job.status !== 'running') return;
+            hidup.habis = true;
+            job.status = 'failed';
+            job.error = 'TIMEOUT_5MENIT: tugas belum selesai dalam 5 menit';
+            console.error(`[GATEWAY] TIMEOUT_5MENIT job=${job.id} sesi=${jejakAman.sesi ?? '-'} jenis=${jejakAman.jenis || '-'}`);
+            if (hidup.context) hidup.context.close().catch(() => {});
+            if (hidup.browser) hidup.browser.close().catch(() => {});
+        }, 5 * 60 * 1000);
+        let sesi = null;
+        const sesiAmbil = await poolBrowser.takeNext(batasPada);
+        if (hidup.habis) throw new Error('TIMEOUT_5MENIT: tugas belum selesai dalam 5 menit');
+        sesi = sesiAmbil;
         sesiDipakai = sesi;
         console.log(`[GATEWAY] tugas memakai ${sesi.id} — daftar sehat tersisa dicek ulang di [CEK]`);
         console.log(`[JEJAK] COOKIE job=${job.id} sesi=${jejakAman.sesi ?? '-'} jenis=${jejakAman.jenis || '-'} giliran=${jejakAman.giliran || '-'} cookie=${sesi.id}`);
         try {
-            const out = await kerjakanDenganBrowserBaru(action, prompt, isThinkingMode, translatedFiles, sesi, jejakAman);
+            const out = await kerjakanDenganBrowserBaru(action, prompt, isThinkingMode, translatedFiles, sesi, jejakAman, hidup);
+            if (hidup.habis) throw new Error('TIMEOUT_5MENIT: tugas belum selesai dalam 5 menit');
             const hasilNama = (out.hasil.files || []).join(',');
             console.log(`[JEJAK] SELESAI job=${job.id} sesi=${jejakAman.sesi ?? '-'} jenis=${jejakAman.jenis || '-'} giliran=${jejakAman.giliran || '-'} cookie=${sesi.id} hasil=${hasilNama || '-'}`);
             job.status = 'success';
@@ -418,14 +449,18 @@ app.post('/api/generate', async (req, res) => {
             if (poolBrowser && typeof poolBrowser.releaseWorker === 'function') poolBrowser.releaseWorker();
         }
     } catch (error) {
-        if (sesiDipakai && /COOKIE_INVALID/.test(error.message || '') && poolBrowser && typeof poolBrowser.catatCookieMati === 'function') {
-            await poolBrowser.catatCookieMati(sesiDipakai.index, error.message).catch(() => {});
+        const habis = /TIMEOUT_5MENIT/.test(error.message || '') || hidup.habis;
+        if (!(habis && job.error && job.error.startsWith('TIMEOUT_5MENIT'))) {
+            if (!habis && sesiDipakai && /COOKIE_INVALID/.test(error.message || '') && poolBrowser && typeof poolBrowser.catatCookieMati === 'function') {
+                await poolBrowser.catatCookieMati(sesiDipakai.index, error.message).catch(() => {});
+            }
+            job.status = 'failed';
+            job.error = habis ? 'TIMEOUT_5MENIT: tugas belum selesai dalam 5 menit' : error.message;
         }
-        job.status = 'failed';
-        job.error = error.message;
-        console.error(`[JEJAK] GAGAL job=${job.id} sesi=${jejakAman.sesi ?? '-'} jenis=${jejakAman.jenis || '-'} giliran=${jejakAman.giliran || '-'} alasan=${error.message}`);
-        console.error(`[GATEWAY] ❌ TUGAS GAGAL: ${error.message}`);
+        console.error(`[JEJAK] GAGAL job=${job.id} sesi=${jejakAman.sesi ?? '-'} jenis=${jejakAman.jenis || '-'} giliran=${jejakAman.giliran || '-'} alasan=${job.error}`);
+        console.error(`[GATEWAY] ❌ TUGAS GAGAL: ${job.error}`);
     } finally {
+        if (timerTugas) clearTimeout(timerTugas);
         translatedFiles.forEach(file => { if (fs.existsSync(file)) fs.unlinkSync(file); });
     }
 });
@@ -437,6 +472,7 @@ async function publikasikanSaatSatuSehat(activeUrl) {
         const snap = poolBrowser && typeof poolBrowser.snapshot === 'function' ? poolBrowser.snapshot() : null;
         const pertama = snap && Array.isArray(snap.list) ? snap.list[0] : null;
         if (pertama) {
+            urlMesinIni = activeUrl;
             await redis.set('active_gateway_url', activeUrl);
             console.log(`[SYSTEM] 🟢 TAUTAN CLOUDFLARE DIBUKA. Slot 1 = cookie #${pertama}. Vercel dialihkan ke mesin ini.`);
             return;
